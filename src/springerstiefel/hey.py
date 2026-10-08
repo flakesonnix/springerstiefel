@@ -287,40 +287,38 @@ class HeyClient:
     ) -> tuple[str, Sources]:
         """Fetch the Hey_ answer plus citation sources.
 
-        One retry each on deflection and drift (see before); sources always
-        come from the accepted attempt.
+        Retry budget: at most 2 extra calls. An explicit action request
+        without any tool call always retries once (objective criterion, no
+        phrase matching); deflection and news/weather drift retry with
+        their nudges. Sources always come from the accepted attempt.
         (Disable retries via HEY_TOOL_RETRY=0.)
         """
         answer, sources = await self.full_text_with_sources(message, session)
         if not tool_defs or not settings.tool_retry:
             return answer, sources
-        _, calls = tools.extract_tool_calls(answer)
-        if calls:
-            if tools.calls_with_empty_args(calls, tool_defs):
-                second, second_sources = await self.full_text_with_sources(
-                    f"{message}\n\n{tools.EMPTY_ARGS_NUDGE}", session
+        for _ in range(2):
+            _, calls = tools.extract_tool_calls(answer)
+            if calls:
+                if not tools.calls_with_empty_args(calls, tool_defs):
+                    return answer, sources
+                nudge = tools.EMPTY_ARGS_NUDGE
+            elif tools.denies_capability(answer):
+                nudge = tools.CAPABILITY_NUDGE
+            elif tools.is_action_request(user_text):
+                nudge = tools.TOOL_RETRY_NUDGE
+            elif tools.is_deflection(answer):
+                nudge = tools.TOOL_RETRY_NUDGE
+            else:
+                kind = tools.drift_kind(answer, user_text)
+                if not kind:
+                    return answer, sources
+                topics = (
+                    "Nachrichten- und Schlagzeilen-Themen"
+                    if kind == "news"
+                    else "Wetter-Themen"
                 )
-                _, second_calls = tools.extract_tool_calls(second)
-                if second_calls:
-                    return second, second_sources
-            return answer, sources
-        if tools.is_deflection(answer):
-            second, second_sources = await self.full_text_with_sources(
-                f"{message}\n\n{tools.TOOL_RETRY_NUDGE}", session
-            )
-            _, calls = tools.extract_tool_calls(second)
-            if calls or not tools.drift_kind(second, user_text):
-                return second, second_sources
-            answer, sources = second, second_sources
-        kind = tools.drift_kind(answer, user_text)
-        if kind:
-            topics = (
-                "Nachrichten- und Schlagzeilen-Themen"
-                if kind == "news"
-                else "Wetter-Themen"
-            )
-            return await self.full_text_with_sources(
-                f"{message}\n\n{tools.news_refocus_nudge(user_text, topics)}",
-                session,
+                nudge = tools.news_refocus_nudge(user_text, topics)
+            answer, sources = await self.full_text_with_sources(
+                f"{message}\n\n{nudge}", session
             )
         return answer, sources

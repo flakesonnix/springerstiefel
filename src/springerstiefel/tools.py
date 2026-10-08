@@ -2,6 +2,9 @@
 
 import json
 import re
+import tomllib
+from importlib import resources
+from typing import Any
 
 from springerstiefel.types import JsonDict
 
@@ -32,124 +35,56 @@ TOOL_CALL_RE: re.Pattern[str] = re.compile(
 
 # Reply patterns that look like dodging/refusal instead of tool use.
 # Only then is a single retry with a nudge worth it.
-REFUSAL_RES: list[re.Pattern[str]] = [
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"wobei soll ich",
-        r"wobei kann ich",
-        r"womit kann ich",
-        r"wie kann ich.*helfen",
-        r"lassen sie mich wissen",
-        r"kann .* nicht",
-        r"kann .* keine",
-        r"in diesem schritt",
-        r"meinen sie",
-        r"leider kann",
-        r"brauche .* (mehr|weitere|genauere)",
-        r"nennen sie (bitte )?(pfad|datei|inhalt)",
-        r"sagen sie (mir )?(bitte )?(was|welche)",
-        r"soll ich",
-        r"möchten sie, dass ich",
-        r"wenn sie möchten",
-        r"sagen sie bescheid",
-        r"geben sie bescheid",
-        r"darf ich",
-        r"welche datei",
-        r"how can i help",
-        r"should i",
-        r"shall i",
-        r"do you want me to",
-        r"would you like me to",
-        r"let me know if",
-        r"i can (add|create|write|make|generate|implement|provide)",
-        r"i can('|no)t",
-        r"i('| a)m not able to",
-    )
-]
+# Patterns live in patterns.toml and hot-reload on change (see below).
+REFUSAL_RES: list[re.Pattern[str]] = []
+ACTION_REQUEST_RES: list[re.Pattern[str]] = []
+NEWS_RES: list[re.Pattern[str]] = []
+NEWS_REQUEST_RES: list[re.Pattern[str]] = []
+WEATHER_RES: list[re.Pattern[str]] = []
+WEATHER_REQUEST_RES: list[re.Pattern[str]] = []
 
-# Requests that clearly want an action (not text) – the proxy escalates
-# those to a mandatory tone.
-ACTION_REQUEST_RES: list[re.Pattern[str]] = [
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"erstelle .* datei",
-        r"erstellen .* datei",
-        r"schreibe .* (datei|programm|code)",
-        r"lege .* datei an",
-        r"speichere .* (in|als|unter)",
-        r"führe .* aus",
-        r"kompiliere",
-        r"create .* file",
-        r"write .* (file|program|code)",
-        r"adde .* (datei|file)",
-        r"\badd\b .* (datei|file)",
-        r"mach .* (datei|file)",
-        r"füge .* hinzu",
-        r"leg .* an",
-        r"\bfixe?\b",
-        r"behebe",
-        r"korrigiere",
-        r"save .* (to|as|in)",
-        r"\brun\b.*(test|build|command)",
-    )
-]
+_patterns_file_mtime_ns: int | None = None
 
-# Markers for drifting into news mode (BILD grounding with citations).
-NEWS_RES: list[re.Pattern[str]] = [
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"\[bild_\d",
-        r"schlagzeilen",
-        r"bildplus",
-        r"bild berichtet",
-        r"themenkontext",
-    )
-]
 
-# Signals that the user actually wants news – then no retry.
-NEWS_REQUEST_RES: list[re.Pattern[str]] = [
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"nachricht",
-        r"schlagzeile",
-        r"\bnews\b",
-        r"aktuell",
-        r"\bbild\b",
-        r"zeitung",
-        r"was gibt es neues",
-    )
-]
+def _patterns_file():
+    return resources.files("springerstiefel") / "patterns.toml"
 
-# Markers for drifting into weather mode without BILD citations.
-WEATHER_RES: list[re.Pattern[str]] = [
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"\bwetter\b",
-        r"wetterbericht",
-        r"wettervorhersage",
-        r"regenwahrscheinlichkeit",
-        r"\bwind aus\b",
-        r"\bböen\b",
-        r"\bbedeckt\b",
-        r"niederschlag",
-        r"°c",
-    )
-]
 
-# Signals that the user actually wants weather – then no retry.
-WEATHER_REQUEST_RES: list[re.Pattern[str]] = [
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"\bwetter",
-        r"wettervorhersage",
-        r"wetterbericht",
-        r"\bregen\b",
-        r"temperatur",
-        r"\bklima\b",
-        r"\bweather\b",
-        r"forecast",
-    )
-]
+def _ensure_patterns() -> None:
+    """Reload patterns.toml if it changed (in place, no restart needed).
+
+    Lists are updated in place so existing references stay valid. On parse
+    errors the previous patterns are kept.
+    """
+    global _patterns_file_mtime_ns
+    try:
+        path = _patterns_file()
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        return
+    if mtime_ns == _patterns_file_mtime_ns:
+        return
+    try:
+        data: dict[str, Any] = tomllib.loads(path.read_bytes().decode("utf-8"))
+        if not isinstance(data, dict):
+            return
+        updates: dict[str, list[re.Pattern[str]]] = {}
+        for key in _TABLES:
+            section = data.get(key)
+            if not isinstance(section, dict):
+                continue  # keep previous table
+            patterns = section.get("patterns")
+            if not isinstance(patterns, list):
+                continue  # keep previous table
+            updates[key] = [
+                re.compile(p, re.IGNORECASE) for p in patterns
+            ]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return
+    for key, compiled in updates.items():
+        _TABLES[key][:] = compiled
+    _patterns_file_mtime_ns = mtime_ns
+
 
 TOOL_RETRY_NUDGE = (
     "[Hinweis: Löse die Aufgabe per Aktions-Block aus "
@@ -161,6 +96,31 @@ EMPTY_ARGS_NUDGE = (
     "[Hinweis: Fülle alle Argumente der Aktion vollständig mit sinnvollen "
     "Inhalten aus – leere Argumente sind nutzlos.]"
 )
+
+CAPABILITY_DENIAL_RES: list[re.Pattern[str]] = []
+
+_TABLES: dict[str, list[re.Pattern[str]]] = {
+    "refusal": REFUSAL_RES,
+    "action_request": ACTION_REQUEST_RES,
+    "capability_denial": CAPABILITY_DENIAL_RES,
+    "news": NEWS_RES,
+    "news_request": NEWS_REQUEST_RES,
+    "weather": WEATHER_RES,
+    "weather_request": WEATHER_REQUEST_RES,
+}
+
+_ensure_patterns()
+
+CAPABILITY_NUDGE = (
+    "[Hinweis: Die untenstehenden Aktionen geben dir vollen Dateizugriff "
+    "(lesen, schreiben, ausführen). Nutze sie jetzt für die Aufgabe.]"
+)
+
+
+def denies_capability(answer: str) -> bool:
+    """True if the model claims it lacks tools/access it actually has."""
+    _ensure_patterns()
+    return any(pattern.search(answer) for pattern in CAPABILITY_DENIAL_RES)
 
 
 def calls_with_empty_args(
@@ -189,16 +149,19 @@ def calls_with_empty_args(
 
 def is_deflection(answer: str) -> bool:
     """True if the answer looks like refusal/deflection."""
+    _ensure_patterns()
     return any(pattern.search(answer) for pattern in REFUSAL_RES)
 
 
 def is_action_request(user_text: str) -> bool:
     """True if the user clearly wants an action (not text)."""
+    _ensure_patterns()
     return any(pattern.search(user_text) for pattern in ACTION_REQUEST_RES)
 
 
 def is_news_drift(answer: str, user_text: str) -> bool:
     """True on headline dumps although no news was asked for."""
+    _ensure_patterns()
     if any(pattern.search(user_text) for pattern in NEWS_REQUEST_RES):
         return False
     return any(pattern.search(answer) for pattern in NEWS_RES)
@@ -206,6 +169,7 @@ def is_news_drift(answer: str, user_text: str) -> bool:
 
 def is_weather_drift(answer: str, user_text: str) -> bool:
     """True on weather dumps although no weather was asked for."""
+    _ensure_patterns()
     if any(pattern.search(user_text) for pattern in WEATHER_REQUEST_RES):
         return False
     return any(pattern.search(answer) for pattern in WEATHER_RES)

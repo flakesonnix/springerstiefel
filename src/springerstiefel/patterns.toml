@@ -1,0 +1,143 @@
+# Detection patterns for the Hey_ gateway. Edit freely – no code changes
+# needed. Each list holds Python regexes (matched case-insensitively).
+# Triple-quoted so backslashes and quotes stay literal.
+
+[refusal]
+# Replies that dodge instead of using tools -> single retry with a nudge.
+patterns = [
+    '''wobei soll ich''',
+    '''wobei kann ich''',
+    '''womit kann ich''',
+    '''wie kann ich.*helfen''',
+    '''lassen sie mich wissen''',
+    '''kann .*nicht''',
+    '''kann .*keine''',
+    '''in diesem schritt''',
+    '''meinen sie''',
+    '''leider kann''',
+    '''brauche .*(mehr|weitere|genauere)''',
+    '''nennen sie (bitte )?(pfad|datei|inhalt)''',
+    '''sagen sie (mir )?(bitte )?(was|welche)''',
+    '''soll ich''',
+    '''möchten sie, dass ich''',
+    '''wenn sie möchten''',
+    '''sagen sie bescheid''',
+    '''geben sie bescheid''',
+    '''darf ich''',
+    '''kann hier nur''',
+    '''bin .*für .*da''',
+    '''nur bei fragen''',
+    '''welche datei''',
+    '''how can i help''',
+    '''should i''',
+    '''shall i''',
+    '''do you want me to''',
+    '''would you like me to''',
+    '''let me know if''',
+    '''if you want''',
+    '''paste the''',
+    '''i need .*(exposed|enabled|access)''',
+    '''i need .*tool''',
+    '''not available in this chat''',
+    '''aren't available''',
+    '''need a writable''',
+    '''can only inspect''',
+    '''enable the .*tool''',
+    '''i can (add|create|write|make|generate|implement|provide)''',
+    '''i can help you (build|create|write|make|generate)''',
+    '''just do it''',
+    '''i can('|no)t''',
+    '''i('| a)m not able to''',
+    '''only contains system instructions''',
+    '''no new request''',
+    '''state .*what you want''',
+    '''keine neue (anfrage|nachricht|aufgabe)''',
+    '''nur systemanweisungen''',
+]
+
+[capability_denial]
+# Claims of missing tools/access although tools are offered.
+patterns = [
+    '''kann hier nur''',
+    '''bin .*für .*da''',
+    '''need a writable''',
+    '''can only inspect''',
+    '''aren't available''',
+    '''not available in this chat''',
+    '''keine .*rechte''',
+    '''kein .*zugriff''',
+]
+
+[action_request]
+# User asks that clearly want an action -> mandatory tone.
+patterns = [
+    '''erstelle .*datei''',
+    '''erstellen .*datei''',
+    '''schreibe .*(datei|programm|code)''',
+    '''lege .*datei an''',
+    '''speichere .*(in|als|unter)''',
+    '''führe .*aus''',
+    '''kompiliere''',
+    '''create .*file''',
+    '''create a .*(calculator|rechner|app|tool|script|spiel|game|programm|program)''',
+    '''write .*(file|program|code)''',
+    '''adde .*(datei|file)''',
+    '''\badd\b .*(datei|file)''',
+    '''mach .*(datei|file)''',
+    '''füge .*hinzu''',
+    '''leg .*an''',
+    '''\bfixe?\b''',
+    '''behebe''',
+    '''korrigiere''',
+    '''save .*(to|as|in)''',
+    '''\brun\b.*(test|build|command)''',
+]
+
+[news]
+# Markers for drifting into news mode (BILD grounding with citations).
+patterns = [
+    '''\[bild_\d''',
+    '''schlagzeilen''',
+    '''bildplus''',
+    '''bild berichtet''',
+    '''themenkontext''',
+]
+
+[news_request]
+# Signals that the user actually wants news – then no retry.
+patterns = [
+    '''nachricht''',
+    '''schlagzeile''',
+    '''\bnews\b''',
+    '''aktuell''',
+    '''\bbild\b''',
+    '''zeitung''',
+    '''was gibt es neues''',
+]
+
+[weather]
+# Markers for drifting into weather mode without BILD citations.
+patterns = [
+    '''\bwetter\b''',
+    '''wetterbericht''',
+    '''wettervorhersage''',
+    '''regenwahrscheinlichkeit''',
+    '''\bwind aus\b''',
+    '''\bböen\b''',
+    '''\bbedeckt\b''',
+    '''niederschlag''',
+    '''°c''',
+]
+
+[weather_request]
+# Signals that the user actually wants weather – then no retry.
+patterns = [
+    '''\bwetter''',
+    '''wettervorhersage''',
+    '''wetterbericht''',
+    '''\bregen\b''',
+    '''temperatur''',
+    '''\bklima\b''',
+    '''\bweather\b''',
+    '''forecast''',
+]

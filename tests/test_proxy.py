@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import time
 import unittest.mock
 
@@ -157,6 +158,7 @@ def test_build_hey_message_embeds_system_and_history():
     assert "[Systemanweisung]\nSei knapp." in text
     assert "Benutzer: Was ist 2+2?" in text
     assert "Assistent: 4" in text
+    assert text.startswith("Aufgabe / Task:\nUnd 3+3?")
     assert text.endswith("Aktuelle Anweisung:\nUnd 3+3?")
     assert "[Umgangston]" in text
     assert "verbindliche Anweisungen" in text
@@ -429,6 +431,24 @@ def test_is_deflection_detects_refusals():
     assert tools_module.is_deflection("I can add a minimal flake.nix for this.")
     assert tools_module.is_deflection("Would you like me to create the file?")
     assert tools_module.is_deflection("Should I run the tests first?")
+    assert tools_module.is_deflection("I need the project workspace tools.")
+    assert tools_module.is_deflection("They aren't available in this chat.")
+    assert tools_module.denies_capability("I need a writable environment.")
+    assert tools_module.denies_capability("Ich kann hier nur helfen.")
+    assert not tools_module.denies_capability("Hier ist der Code.")
+    assert tools_module.is_deflection("I can help you build it next.")
+    assert tools_module.is_action_request("create a calculator in rust")
+    assert tools_module.is_action_request("Erstelle Datei x.")
+    assert tools_module.is_action_request("write file f.")
+    assert tools_module.is_deflection("Ich kann nicht helfen.")
+    assert tools_module.is_deflection(
+        "Your message only contains system instructions and no new request."
+    )
+    assert tools_module.is_deflection(
+        "If you want, paste the project directory and I'll generate it."
+    )
+    assert tools_module.is_deflection("Ich kann hier nur bei Fragen helfen.")
+    assert tools_module.is_deflection("Ich bin hier als Hey_ für BILD da.")
 
 
 def test_is_deflection_accepts_normal_text():
@@ -1012,6 +1032,34 @@ def test_hey_answer_refocuses_weather_drift():
     assert answer == "Erledigt."
 
 
+def test_hey_answer_counters_capability_denial():
+    calls = {"n": 0}
+
+    async def events_deny(self, message: str, session=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield ("final", "I need a writable environment to continue.")
+        else:
+            assert "vollen Dateizugriff" in message
+            yield (
+                "final",
+                '<<TOOL_CALL>>\n{"name": "write", "arguments": {"path": "f"}}\n'
+                "<<END_TOOL_CALL>>",
+            )
+        yield ("done", None)
+
+    async def run():
+        with unittest.mock.patch.object(HeyClient, "events", events_deny):
+            return await HeyClient().answer(
+                "Mach X.", [{"type": "function"}], "Write the file f."
+            )
+
+    answer, _ = asyncio.run(run())
+
+    assert calls["n"] == 2
+    assert "TOOL_CALL" in answer
+
+
 def test_detect_language():
     assert language_module.detect_language("Write a calculator in rust.") == "en"
     assert language_module.detect_language("Erstelle die Datei calc.rs.") == "de"
@@ -1120,3 +1168,95 @@ def test_pick_experience_prefers_chat_and_slug(monkeypatch):
     assert hey_module.pick_experience([{"slug": "no-id"}]) == (
         config_module.DEFAULT_EXPERIENCE_ID
     )
+
+
+@pytest.fixture()
+def restore_patterns():
+    """Snapshot pattern tables; restore afterwards (hot-reload tests mutate)."""
+    snapshot = {key: list(table) for key, table in tools_module._TABLES.items()}
+    yield
+    for key, table in tools_module._TABLES.items():
+        table[:] = snapshot[key]
+    tools_module._patterns_file_mtime_ns = None
+
+
+def test_patterns_loaded_from_toml():
+    for table in (
+        tools_module.REFUSAL_RES,
+        tools_module.ACTION_REQUEST_RES,
+        tools_module.NEWS_RES,
+        tools_module.NEWS_REQUEST_RES,
+        tools_module.WEATHER_RES,
+        tools_module.WEATHER_REQUEST_RES,
+    ):
+        assert len(table) > 0
+
+
+def test_patterns_hot_reload_on_change(tmp_path, monkeypatch, restore_patterns):
+    toml_path = tmp_path / "patterns.toml"
+    toml_path.write_text(
+        '[refusal]\npatterns = ["wobei soll ich"]\n'
+        '[action_request]\npatterns = []\n'
+        '[capability_denial]\npatterns = []\n'
+        '[news]\npatterns = []\n'
+        '[news_request]\npatterns = []\n'
+        '[weather]\npatterns = []\n'
+        '[weather_request]\npatterns = []\n'
+    )
+    monkeypatch.setattr(tools_module, "_patterns_file_mtime_ns", None)
+    monkeypatch.setattr(
+        tools_module, "_patterns_file", lambda: toml_path
+    )
+
+    assert tools_module.is_deflection("Wobei soll ich helfen?")
+    assert not tools_module.is_deflection("Xyzzy here, nothing to match.")
+
+    # Edit the file with a fresh mtime -> new patterns apply, no restart.
+    toml_path.write_text(
+        toml_path.read_text().replace("wobei soll ich", "xyzzy")
+    )
+    os.utime(toml_path, (time.time() + 5, time.time() + 5))
+
+    assert tools_module.is_deflection("Xyzzy here, nothing to match.")
+    assert not tools_module.is_deflection("Wobei soll ich helfen?")
+
+
+def test_patterns_keep_old_on_invalid_toml(tmp_path, monkeypatch, restore_patterns):
+    before = list(tools_module.REFUSAL_RES)
+    assert len(before) > 0
+    toml_path = tmp_path / "patterns.toml"
+    toml_path.write_text("not valid [[[ toml")
+    monkeypatch.setattr(tools_module, "_patterns_file_mtime_ns", None)
+    monkeypatch.setattr(
+        tools_module, "_patterns_file", lambda: toml_path
+    )
+
+    assert tools_module.is_deflection("Wobei soll ich helfen?")
+    assert list(tools_module.REFUSAL_RES) == before
+
+
+def test_hey_answer_retries_action_request_without_deflection():
+    calls = {"n": 0}
+
+    async def events_plain(self, message: str, session=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield ("final", "Hier der Code zum Kopieren.")
+        else:
+            yield (
+                "final",
+                '<<TOOL_CALL>>\n{"name": "write", "arguments": {"path": "f"}}\n'
+                "<<END_TOOL_CALL>>",
+            )
+        yield ("done", None)
+
+    async def run():
+        with unittest.mock.patch.object(HeyClient, "events", events_plain):
+            return await HeyClient().answer(
+                "Mach X.", [{"type": "function"}], "Write the file f."
+            )
+
+    answer, _ = asyncio.run(run())
+
+    assert calls["n"] == 2
+    assert "TOOL_CALL" in answer

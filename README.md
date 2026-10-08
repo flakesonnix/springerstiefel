@@ -198,8 +198,11 @@ handles parallel requests cleanly.
   With tools, streaming mode buffers (no live token stream); without tools
   the Hey_ stream passes through live.
 - **Retry on deflection:** if tools were offered but no tool call comes back
-  and the answer looks like a refusal/deflection (patterns in `REFUSAL_RES`),
-  it is retried once with a nudge (`HEY_TOOL_RETRY=0` disables it).
+  and the answer looks like a refusal/deflection, offer-question (“should I…”)
+  or capability denial (“I need writable tools”), it is retried once with a
+  nudge (`HEY_TOOL_RETRY=0` disables it). All detection patterns live in
+  `src/springerstiefel/patterns.toml` and hot-reload on edit – no restart,
+  no hardcoded strings in code.
 - **Retry on news/weather drift:** if the proxy spots BILD markers (`[bild_0_1]`,
   “headlines”, “BILDplus” …) or weather markers (“rain probability”, “gusts”,
   “°C” …) although neither news nor weather was asked for, it retries once

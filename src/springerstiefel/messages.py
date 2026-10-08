@@ -157,6 +157,7 @@ def build_hey_message(
     sections = [
         s
         for s in (
+            f"Aufgabe / Task:\n{current}",
             system_section,
             "[Bisheriger Verlauf]\n" + "\n".join(lines) if lines else None,
             TONE_NOTE,
@@ -216,6 +217,7 @@ def render_final(parts: FinalParts, summaries: list[str]) -> str:
     sections = [
         s
         for s in (
+            f"Aufgabe / Task:\n{parts['current']}",
             parts["system"],
             (
                 "[Zusammenfassung früherer Verlaufsteile]\n"
