@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "hey/hey",
+  "provider": {
+    "hey": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Hey_ BILD",
+      "options": { "baseURL": "http://127.0.0.1:8787/v1" },
+      "models": { "hey": { "name": "Hey_" } }
+    }
+  }
+}

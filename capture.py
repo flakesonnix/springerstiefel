@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+
+import asyncio
+import json
+from pathlib import Path
+
+from playwright.async_api import async_playwright
+
+
+DATA_DIR = Path("data")
+PROFILE_DIR = DATA_DIR / "browser-firefox"
+TRAFFIC_FILE = DATA_DIR / "traffic.jsonl"
+
+INTERESTING_KEYWORDS = (
+    "api",
+    "chat",
+    "conversation",
+    "message",
+    "completion",
+    "graphql",
+    "experience",
+)
+
+
+def is_interesting_url(url: str) -> bool:
+    return any(x in url.lower() for x in INTERESTING_KEYWORDS)
+
+
+async def main_async() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
+    async with async_playwright() as p:
+        context = await p.firefox.launch_persistent_context(
+            str(PROFILE_DIR),
+            headless=False,
+        )
+
+        page = context.pages[0] if context.pages else await context.new_page()
+
+        print("[*] Öffne Hey_ …")
+        await page.goto("https://hey.bild.de/", wait_until="domcontentloaded")
+
+        print()
+        print("==============================================")
+        print(" Browser ist offen.")
+        print(" Falls nötig: anmelden.")
+        print(" Danach in Hey_ eine Testnachricht senden.")
+        print(" Beispiel: 'Sag einfach hallo'")
+        print("==============================================")
+        print()
+
+        async def request_handler(request):
+            resource = request.resource_type
+
+            if resource not in {"fetch", "xhr"}:
+                return
+
+            url = request.url
+
+            if not is_interesting_url(url):
+                return
+
+            try:
+                post_data = request.post_data
+            except Exception:
+                post_data = None
+
+            entry = {
+                "kind": "request",
+                "method": request.method,
+                "url": url,
+                "resource_type": resource,
+                "headers": dict(request.headers),
+                "post_data": post_data,
+            }
+
+            with TRAFFIC_FILE.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+            print()
+            print(">>> REQUEST")
+            print(request.method, url)
+
+            if post_data:
+                print(post_data[:4000])
+
+        async def response_handler(response):
+            request = response.request
+
+            if request.resource_type not in {"fetch", "xhr"}:
+                return
+
+            url = response.url
+
+            if not is_interesting_url(url):
+                return
+
+            try:
+                body = await response.text()
+            except Exception:
+                body = "<unable to read response>"
+
+            entry = {
+                "kind": "response",
+                "status": response.status,
+                "url": url,
+                "headers": dict(response.headers),
+                "body": body[:100000],
+            }
+
+            with TRAFFIC_FILE.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+            print()
+            print("<<< RESPONSE", response.status, url)
+            print(body[:3000])
+
+        page.on("request", request_handler)
+        page.on("response", response_handler)
+
+        print("[*] Mitschnitt läuft.")
+        print("[*] Drücke Enter, wenn du die Testnachricht abgeschickt hast.")
+        await asyncio.to_thread(input)
+
+        print()
+        print(f"[*] Traffic gespeichert in: {TRAFFIC_FILE}")
+
+        await context.close()
+
+
+def main() -> None:
+    asyncio.run(main_async())
+
+
+if __name__ == "__main__":
+    main()
