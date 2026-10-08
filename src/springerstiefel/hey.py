@@ -3,8 +3,10 @@
 import asyncio
 import json
 import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -162,12 +164,34 @@ class _PooledTransport(httpx.AsyncHTTPTransport):
     """
 
 
+@dataclass
+class TurnState:
+    """Last turn of this client: messages, conversation, cookies, timestamp."""
+
+    messages: list[Message] = field(default_factory=list)
+    conversation_id: str = ""
+    cookies: dict[str, str] = field(default_factory=dict)
+    at: float = 0.0
+
+
+def _jar_cookies(client: httpx.AsyncClient) -> dict[str, str]:
+    try:
+        return {
+            cookie.name: cookie.value
+            for cookie in client.cookies.jar
+            if cookie.value is not None
+        }
+    except Exception:
+        return {}
+
+
 class HeyClient:
     """Stateful client for the Hey_ website backend."""
 
     def __init__(self, experience_id: str | None = None) -> None:
         self._experience_id = experience_id or settings.experience_id
         self._resolved_experience_id: str | None = None
+        self._last_turn: TurnState | None = None
 
     async def resolve_experience_id(self, client: httpx.AsyncClient) -> str:
         """Return the experience ID for new conversations.
@@ -204,6 +228,55 @@ class HeyClient:
             )
             conv.raise_for_status()
             yield client, conv.json()["conversationId"]
+
+    @asynccontextmanager
+    async def turn_session(
+        self, messages: list[Message]
+    ) -> AsyncIterator[tuple[httpx.AsyncClient, str, bool]]:
+        """Yield (client, conversation_id, reused) for one proxy turn.
+
+        When this turn's history strictly extends the previous turn's (the
+        normal agent-loop shape) and that turn is fresh, its conversation
+        and cookies are reused – saving one conversation POST. Otherwise a
+        new conversation is opened. Disable via HEY_REUSE_CONVERSATION=0.
+        """
+        now = time.monotonic()
+        prev = self._last_turn
+        if (
+            settings.reuse_conversation
+            and prev is not None
+            and now - prev.at < settings.reuse_ttl
+            and len(messages) > len(prev.messages)
+            and messages[: len(prev.messages)] == prev.messages
+        ):
+            client = httpx.AsyncClient(
+                transport=shared_transport(),
+                base_url=settings.base_url,
+                headers=BROWSER_HEADERS,
+                timeout=settings.timeout,
+                cookies=prev.cookies,
+            )
+            try:
+                yield client, prev.conversation_id, True
+            finally:
+                self._last_turn = TurnState(
+                    list(messages),
+                    prev.conversation_id,
+                    _jar_cookies(client),
+                    time.monotonic(),
+                )
+                await client.aclose()
+            return
+        async with self.session() as (client, conversation_id):
+            try:
+                yield client, conversation_id, False
+            finally:
+                self._last_turn = TurnState(
+                    list(messages),
+                    conversation_id,
+                    _jar_cookies(client),
+                    time.monotonic(),
+                )
 
     async def _chat_stream(
         self, client: httpx.AsyncClient, conversation_id: str, message: str

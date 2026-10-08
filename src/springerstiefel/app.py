@@ -1,6 +1,8 @@
 """FastAPI app: OpenAI-compatible HTTP layer (:8787)."""
 
 import json
+import os
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -16,7 +18,15 @@ from springerstiefel.types import JsonDict, Message, ToolChoice
 
 hey = HeyClient()
 
+DEBUG = os.environ.get("HEY_DEBUG", "0") == "1"
+
 app = FastAPI(title="springerstiefel")
+
+
+def debug_log(**fields: object) -> None:
+    if DEBUG:
+        line = " ".join(f"{key}={value}" for key, value in fields.items())
+        print(f"[hey-proxy] {line}", flush=True)
 
 
 @app.get("/v1/models")
@@ -107,12 +117,24 @@ async def chat_completions(
         return f"data: {json.dumps(payload)}\n\n"
 
     try:
+        started = time.perf_counter()
         if not stream:
-            async with hey.session() as session:
-                text = await resolve_text(session)
+            async with hey.turn_session(request_messages) as (client, cid, reused):
+                session_ms = (time.perf_counter() - started) * 1000
+                text = await resolve_text((client, cid))
                 answer, sources = await hey.answer(
-                    text, tool_defs, user_text, session
+                    text, tool_defs, user_text, (client, cid)
                 )
+            debug_log(
+                mode="non-stream",
+                in_messages=len(request_messages),
+                tools=len(tool_defs or []),
+                hey_chars=len(text),
+                reused=reused,
+                session_ms=f"{session_ms:.0f}",
+                total_ms=f"{(time.perf_counter() - started) * 1000:.0f}",
+                finish="n/a",
+            )
             message, finish = completion_message(
                 hey_module.append_sources(answer, sources)
             )
@@ -131,11 +153,22 @@ async def chat_completions(
         # reuse anything from the endpoint scope).
         if tool_defs:
             async def generate_buffered() -> AsyncIterator[str]:
-                async with hey.session() as session:
-                    text = await resolve_text(session)
+                started = time.perf_counter()
+                async with hey.turn_session(request_messages) as (client, cid, reused):
+                    session_ms = (time.perf_counter() - started) * 1000
+                    text = await resolve_text((client, cid))
                     yield chunk(role="assistant")
                     answer, sources = await hey.answer(
-                        text, tool_defs, user_text, session
+                        text, tool_defs, user_text, (client, cid)
+                    )
+                    debug_log(
+                        mode="stream-buffered",
+                        in_messages=len(request_messages),
+                        tools=len(tool_defs or []),
+                        hey_chars=len(text),
+                        reused=reused,
+                        session_ms=f"{session_ms:.0f}",
+                        total_ms=f"{(time.perf_counter() - started) * 1000:.0f}",
                     )
                     message, finish = completion_message(
                         hey_module.append_sources(answer, sources)
@@ -153,13 +186,18 @@ async def chat_completions(
             )
 
         async def generate() -> AsyncIterator[str]:
-            async with hey.session() as session:
-                text = await resolve_text(session)
+            started = time.perf_counter()
+            first_ms: float | None = None
+            async with hey.turn_session(request_messages) as (client, cid, reused):
+                session_ms = (time.perf_counter() - started) * 1000
+                text = await resolve_text((client, cid))
                 yield chunk(role="assistant")
                 seen_text: list[str] = []
                 by_index: hey_module.Sources = {}
-                async for kind, value in hey.events(text, session):
+                async for kind, value in hey.events(text, (client, cid)):
                     if kind == "content":
+                        if first_ms is None:
+                            first_ms = (time.perf_counter() - started) * 1000
                         seen_text.append(value)
                         yield chunk(content=value)
                     elif kind == "sources":
@@ -169,6 +207,15 @@ async def chat_completions(
                     yield chunk(content=hey_module.format_sources(section))
                 yield chunk(finish="stop")
                 yield "data: [DONE]\n\n"
+            debug_log(
+                mode="stream-live",
+                in_messages=len(request_messages),
+                hey_chars=len(text),
+                reused=reused,
+                session_ms=f"{session_ms:.0f}",
+                ttft_ms=f"{first_ms:.0f}" if first_ms is not None else "n/a",
+                total_ms=f"{(time.perf_counter() - started) * 1000:.0f}",
+            )
 
         return StreamingResponse(generate(), media_type="text/event-stream")
     except httpx.HTTPError as e:

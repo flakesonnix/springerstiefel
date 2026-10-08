@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+import types
 import unittest.mock
 
 import httpx
@@ -1270,3 +1271,124 @@ def test_hey_answer_retries_action_request_without_deflection():
 
     assert calls["n"] == 2
     assert "TOOL_CALL" in answer
+
+
+class FakeTurnClient:
+    """Fake httpx client: canned conversations, records posts."""
+
+    def __init__(self, cids, posts, *args, **kwargs):
+        self._cids = cids
+        self._posts = posts
+        self.cookies = types.SimpleNamespace(jar=[])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def aclose(self):
+        return None
+
+    async def get(self, url, **kwargs):
+        self._posts.append(("GET", url))
+
+        class Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"data": []}
+
+        return Resp()
+
+    async def post(self, url, **kwargs):
+        self._posts.append(("POST", url))
+
+        class Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(inner_self):
+                return {"conversationId": next(self._cids)}
+
+        return Resp()
+
+
+def run_turns(client, histories):
+    async def run():
+        out = []
+        for messages in histories:
+            async with client.turn_session(messages) as (c, cid, reused):
+                out.append((cid, reused))
+        return out
+
+    return asyncio.run(run())
+
+
+def test_turn_session_reuses_growing_history():
+    cids = iter(["cid-1", "cid-2"])
+    posts = []
+    msgs1 = [{"role": "user", "content": "Hi"}]
+    msgs2 = msgs1 + [
+        {"role": "assistant", "content": "Hallo"},
+        {"role": "user", "content": "Weiter"},
+    ]
+
+    def factory(*args, **kwargs):
+        return FakeTurnClient(cids, posts)
+
+    with unittest.mock.patch.object(hey_module.httpx, "AsyncClient", factory):
+        result = run_turns(HeyClient(), [msgs1, msgs2])
+
+    assert result == [("cid-1", False), ("cid-1", True)]
+    assert [p for p in posts if p[0] == "POST"] == [("POST", "/api/conversations")]
+
+
+def test_turn_session_fresh_on_unrelated_or_same_length():
+    cids = iter(["cid-1", "cid-2", "cid-3"])
+    posts = []
+
+    def factory(*args, **kwargs):
+        return FakeTurnClient(cids, posts)
+
+    with unittest.mock.patch.object(hey_module.httpx, "AsyncClient", factory):
+        client = HeyClient()
+        result = run_turns(
+            client,
+            [
+                [{"role": "user", "content": "Hi"}],
+                [{"role": "user", "content": "Hallo"}],
+                [{"role": "user", "content": "Hallo"}],
+            ],
+        )
+
+    assert [cid for cid, _ in result] == ["cid-1", "cid-2", "cid-3"]
+    assert all(reused is False for _, reused in result)
+
+
+def test_turn_session_respects_ttl_and_switch(monkeypatch):
+    cids = iter(["cid-1", "cid-2"])
+    posts = []
+    msgs1 = [{"role": "user", "content": "Hi"}]
+    msgs2 = msgs1 + [{"role": "user", "content": "Weiter"}]
+
+    def factory(*args, **kwargs):
+        return FakeTurnClient(cids, posts)
+
+    with unittest.mock.patch.object(hey_module.httpx, "AsyncClient", factory):
+        client = HeyClient()
+        run_turns(client, [msgs1])
+        client._last_turn.at -= 10_000
+        assert run_turns(client, [msgs2])[0][1] is False
+
+    cids2 = iter(["cid-1", "cid-2"])
+
+    def factory2(*args, **kwargs):
+        return FakeTurnClient(cids2, [])
+
+    monkeypatch.setattr(config_module.settings, "reuse_conversation", False)
+    with unittest.mock.patch.object(hey_module.httpx, "AsyncClient", factory2):
+        result = run_turns(HeyClient(), [msgs1, msgs2])
+
+    assert [reused for _, reused in result] == [False, False]

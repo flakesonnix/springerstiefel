@@ -88,6 +88,9 @@ HEY_MAX_TOOL_CHARS      max chars per tool result (default: 4000)
 HEY_MAX_CHUNK_CHARS     max chars per history chunk (default: 6000)
 HEY_MAX_CHUNKS          max history chunks in the queue (default: 5)
 HEY_TOOL_RETRY          1/0 – retries on deflection/news drift (default: 1)
+HEY_REUSE_CONVERSATION  1/0 – reuse Hey_ conversation across turns (default: 1)
+HEY_REUSE_TTL           reuse window in seconds (default: 300)
+HEY_DEBUG               1 – per-turn timing log (default: 0)
 ```
 
 Without `HEY_EXPERIENCE_ID`, the proxy picks a usable chat experience from
@@ -169,6 +172,11 @@ handles parallel requests cleanly.
   (one HTTP client + one conversation) – saves one conversation POST
   (~170 ms) per extra call. TCP/TLS connections pool process-wide across
   turns (per-turn cookie jars stay isolated).
+- **Conversation reuse across turns:** when a turn's history strictly
+  extends the previous turn's (the normal agent-loop shape) and that turn
+  is fresh (`HEY_REUSE_TTL`, default 300 s), its conversation and cookies
+  are reused – no new conversation POST (`session_ms=0`). Disable via
+  `HEY_REUSE_CONVERSATION=0`.
   Hey_ accepts only a single message per request, so history, system prompt,
   and tool definitions are embedded as a transcript (`HEY_MAX_HISTORY`,
   default: 30 messages). After a tool round-trip the proxy asks to continue

@@ -32,6 +32,10 @@ class Settings:
     max_chunk_chars: int = 6000
     max_chunks: int = 5
     tool_retry: bool = True
+    # Reuse the previous turn's Hey_ conversation when the history extends
+    # it (agent loop). Saves one conversation POST per step.
+    reuse_conversation: bool = True
+    reuse_ttl: float = 300.0
 
 
 def load_settings() -> Settings:
@@ -45,6 +49,8 @@ def load_settings() -> Settings:
         max_chunk_chars=int(os.environ.get("HEY_MAX_CHUNK_CHARS", "6000")),
         max_chunks=int(os.environ.get("HEY_MAX_CHUNKS", "5")),
         tool_retry=os.environ.get("HEY_TOOL_RETRY", "1") == "1",
+        reuse_conversation=os.environ.get("HEY_REUSE_CONVERSATION", "1") == "1",
+        reuse_ttl=float(os.environ.get("HEY_REUSE_TTL", "300")),
     )
 
 
