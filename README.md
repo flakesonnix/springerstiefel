@@ -190,7 +190,11 @@ handles parallel requests cleanly.
   marks the call as mandatory. Explicit file/action requests
   (“create the file X”, “write the program …”, patterns in
   `ACTION_REQUEST_RES`) escalate to the same mandatory tone, since those
-  can only be fulfilled via a tool call.
+  can only be fulfilled via a tool call. Terse commands work – no polite
+  phrasing needed.
+- **Empty-argument refill:** if a tool call comes back with empty arguments
+  although its schema defines some, the proxy retries once asking to fill
+  them in (`calls_with_empty_args`).
   With tools, streaming mode buffers (no live token stream); without tools
   the Hey_ stream passes through live.
 - **Retry on deflection:** if tools were offered but no tool call comes back

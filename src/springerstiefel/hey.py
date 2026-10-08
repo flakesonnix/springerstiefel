@@ -296,6 +296,13 @@ class HeyClient:
             return answer, sources
         _, calls = tools.extract_tool_calls(answer)
         if calls:
+            if tools.calls_with_empty_args(calls, tool_defs):
+                second, second_sources = await self.full_text_with_sources(
+                    f"{message}\n\n{tools.EMPTY_ARGS_NUDGE}", session
+                )
+                _, second_calls = tools.extract_tool_calls(second)
+                if second_calls:
+                    return second, second_sources
             return answer, sources
         if tools.is_deflection(answer):
             second, second_sources = await self.full_text_with_sources(

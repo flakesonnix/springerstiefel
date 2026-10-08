@@ -20,6 +20,15 @@ def prompt_language(messages: list[Message]) -> str:
     )
 
 
+#: Standing tone note: terse prompts are orders, not chat offers. Calm
+#: wording on purpose (shouting trips the embedded-instruction guardrail).
+TONE_NOTE = (
+    "[Umgangston]\nDer Benutzer schreibt kurz und direkt – das sind "
+    "verbindliche Anweisungen, keine Gesprächsangebote. Keine Vorstellung, "
+    "keine Meta-Kommentare über dich selbst, direkt zur Sache."
+)
+
+
 def message_text(message: Message) -> str:
     """Extract readable text from an OpenAI message (str or parts)."""
     content = message.get("content", "")
@@ -150,6 +159,7 @@ def build_hey_message(
         for s in (
             system_section,
             "[Bisheriger Verlauf]\n" + "\n".join(lines) if lines else None,
+            TONE_NOTE,
             f"Aktuelle Anweisung:\n{current}",
             tool_section,
         )
@@ -219,6 +229,7 @@ def render_final(parts: FinalParts, summaries: list[str]) -> str:
             )
             if parts["lines"]
             else None,
+            TONE_NOTE,
             f"Aktuelle Anweisung:\n{parts['current']}",
             parts["tools"],
         )

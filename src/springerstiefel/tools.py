@@ -22,6 +22,8 @@ TOOL_INSTRUCTIONS = (
     "Bevorzugung: Ist die Aufgabe per Aktion lösbar (Datei erstellen/lesen/"
     "ändern, Befehl ausführen, suchen), nutze IMMER den Block statt "
     "Fließtext. Fließtext nur für Erklärungen und Antworten ohne Aktion."
+    " Die untenstehenden Aktionen stehen dir in dieser Antwort wirklich zur"
+    " Verfügung – das Programm führt sie aus."
 )
 
 TOOL_CALL_RE: re.Pattern[str] = re.compile(
@@ -79,6 +81,14 @@ ACTION_REQUEST_RES: list[re.Pattern[str]] = [
         r"kompiliere",
         r"create .* file",
         r"write .* (file|program|code)",
+        r"adde .* (datei|file)",
+        r"\badd\b .* (datei|file)",
+        r"mach .* (datei|file)",
+        r"füge .* hinzu",
+        r"leg .* an",
+        r"\bfixe?\b",
+        r"behebe",
+        r"korrigiere",
         r"save .* (to|as|in)",
         r"\brun\b.*(test|build|command)",
     )
@@ -146,6 +156,35 @@ TOOL_RETRY_NUDGE = (
     "(siehe Regel für Aktionen), statt Rückfragen zu stellen oder "
     "die Aktion als Fließtext zu beschreiben.]"
 )
+
+EMPTY_ARGS_NUDGE = (
+    "[Hinweis: Fülle alle Argumente der Aktion vollständig mit sinnvollen "
+    "Inhalten aus – leere Argumente sind nutzlos.]"
+)
+
+
+def calls_with_empty_args(
+    calls: list[JsonDict], tool_defs: list[JsonDict] | None
+) -> bool:
+    """True if any call has empty arguments although its schema defines some."""
+    schemas = {
+        func.get("name"): func
+        for tool in tool_defs or []
+        if isinstance(tool, dict)
+        for func in [tool.get("function", {})]
+        if isinstance(func, dict)
+    }
+    for call in calls:
+        func = call.get("function", {})
+        try:
+            args = json.loads(func.get("arguments", "") or "{}")
+        except (ValueError, TypeError):
+            continue
+        schema = schemas.get(func.get("name"), {})
+        params = schema.get("parameters", {}) or {}
+        if isinstance(params, dict) and params.get("properties") and not args:
+            return True
+    return False
 
 
 def is_deflection(answer: str) -> bool:

@@ -158,6 +158,8 @@ def test_build_hey_message_embeds_system_and_history():
     assert "Benutzer: Was ist 2+2?" in text
     assert "Assistent: 4" in text
     assert text.endswith("Aktuelle Anweisung:\nUnd 3+3?")
+    assert "[Umgangston]" in text
+    assert "verbindliche Anweisungen" in text
 
 
 def test_build_hey_message_renders_tool_roundtrip():
@@ -292,8 +294,66 @@ def test_build_hey_message_escalates_action_requests():
 def test_is_action_request():
     assert tools_module.is_action_request("Erstelle die Datei calc.rs.")
     assert tools_module.is_action_request("Write a program that adds numbers.")
+    assert tools_module.is_action_request("adde noch eine flake file")
+    assert tools_module.is_action_request("fix den Typo in README")
     assert not tools_module.is_action_request("Was ist Rust?")
     assert not tools_module.is_action_request("Erkläre mir Ownership.")
+
+
+def test_calls_with_empty_args():
+    schema = [
+        {
+            "type": "function",
+            "function": {
+                "name": "write",
+                "parameters": {"type": "object", "properties": {"path": {}}},
+            },
+        },
+        {"type": "function", "function": {"name": "get_time"}},
+    ]
+    empty = [{"function": {"name": "write", "arguments": "{}"}}]
+    filled = [{"function": {"name": "write", "arguments": '{"path": "x"}'}}]
+    bare = [{"function": {"name": "get_time", "arguments": "{}"}}]
+
+    assert tools_module.calls_with_empty_args(empty, schema) is True
+    assert tools_module.calls_with_empty_args(filled, schema) is False
+    assert tools_module.calls_with_empty_args(bare, schema) is False
+    assert tools_module.calls_with_empty_args(empty, None) is False
+
+
+def test_hey_answer_refills_empty_args():
+    calls = {"n": 0}
+    schema = [
+        {
+            "type": "function",
+            "function": {
+                "name": "write",
+                "parameters": {"type": "object", "properties": {"path": {}}},
+            },
+        }
+    ]
+
+    async def events(self, message: str, session=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield ("final", '<<TOOL_CALL>>\n{"name": "write", "arguments": {}}\n<<END_TOOL_CALL>>')
+        else:
+            assert "Fülle alle Argumente" in message
+            yield (
+                "final",
+                '<<TOOL_CALL>>\n{"name": "write", "arguments": {"path": "f"}}\n'
+                "<<END_TOOL_CALL>>",
+            )
+        yield ("done", None)
+
+    async def run():
+        with unittest.mock.patch.object(HeyClient, "events", events):
+            return await HeyClient().answer("Mach X.", schema)
+
+    answer, _ = asyncio.run(run())
+
+    assert calls["n"] == 2
+    assert '"path": "f"' in answer
 
 
 def test_extract_tool_calls_parses_blocks():
@@ -744,7 +804,10 @@ def test_news_refocus_nudge_truncates_long_task():
 def test_render_final_variants():
     bare = {"system": None, "lines": [], "current": "Hi", "tools": None}
 
-    assert messages_module.render_final(bare, []) == "Aktuelle Anweisung:\nHi"
+    rendered = messages_module.render_final(bare, [])
+
+    assert rendered.endswith("Aktuelle Anweisung:\nHi")
+    assert "[Umgangston]" in rendered
 
     full = {
         "system": "[Systemanweisung]\nSei knapp.",
