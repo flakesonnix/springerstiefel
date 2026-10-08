@@ -365,6 +365,10 @@ def test_is_deflection_detects_refusals():
     assert tools_module.is_deflection("Wie kann ich Ihnen helfen?")
     assert tools_module.is_deflection("Ich kann in diesem Schritt keine Datei anlegen.")
     assert tools_module.is_deflection("Meinen Sie einen Rechner oder das Spiel Rust?")
+    assert tools_module.is_deflection("Soll ich eine flake.nix hinzufügen?")
+    assert tools_module.is_deflection("I can add a minimal flake.nix for this.")
+    assert tools_module.is_deflection("Would you like me to create the file?")
+    assert tools_module.is_deflection("Should I run the tests first?")
 
 
 def test_is_deflection_accepts_normal_text():
