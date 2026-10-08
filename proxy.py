@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import re
+from contextlib import asynccontextmanager
 from typing import AsyncIterator, Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -417,12 +418,15 @@ def extract_tool_calls(text: str) -> tuple[str, list]:
     return clean, openai_calls
 
 
-async def hey_events(message: str) -> AsyncIterator[tuple[str, Any]]:
-    """Führt den Hey_-Flow aus. Yields ("content", str) | ("final", str) | ("done", None).
+# Eine Session = ein HTTP-Client + eine Hey_-Conversation.
+# Ein Proxy-Turn teilt sich genau eine Session (spart je Extra-Call einen
+# Conversation-POST ~170ms + TLS-Handshake und hält den Turn serverseitig
+# in einer Conversation).
+HeySession = tuple[httpx.AsyncClient, str]
 
-    "content": Streaming-Delta. "final": vollständiger Text aus dem
-    Abschluss-Objekt (Duplikat der Deltas – bevorzugen, falls vorhanden).
-    """
+
+@asynccontextmanager
+async def hey_session() -> AsyncIterator[HeySession]:
     async with httpx.AsyncClient(
         base_url=HEY_BASE,
         headers=BROWSER_HEADERS,
@@ -432,39 +436,61 @@ async def hey_events(message: str) -> AsyncIterator[tuple[str, Any]]:
             "/api/conversations", json={"experienceId": HEY_EXPERIENCE_ID}
         )
         conv.raise_for_status()
-        conversation_id = conv.json()["conversationId"]
+        yield client, conv.json()["conversationId"]
 
-        async with client.stream(
-            "POST",
-            "/api/chat",
-            json={"message": message, "source": "custom"},
-            headers={
-                "Accept": "text/event-stream",
-                "x-conversation-id": conversation_id,
-            },
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                payload = line[len("data: "):]
-                if payload == "[DONE]":
-                    break
-                try:
-                    event = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                choices = event.get("choices") or []
-                if not choices:
-                    continue
-                choice = choices[0]
-                delta = choice.get("delta") or {}
-                if delta.get("content"):
-                    yield ("content", delta["content"])
-                full = choice.get("message") or {}
-                text = extract_message_text(full)
-                if text:
-                    yield ("final", text)
+
+async def _hey_events(
+    client: httpx.AsyncClient, conversation_id: str, message: str
+) -> AsyncIterator[tuple[str, Any]]:
+    async with client.stream(
+        "POST",
+        "/api/chat",
+        json={"message": message, "source": "custom"},
+        headers={
+            "Accept": "text/event-stream",
+            "x-conversation-id": conversation_id,
+        },
+    ) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            if not line.startswith("data: "):
+                continue
+            payload = line[len("data: "):]
+            if payload == "[DONE]":
+                break
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            choices = event.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta") or {}
+            if delta.get("content"):
+                yield ("content", delta["content"])
+            full = choice.get("message") or {}
+            text = extract_message_text(full)
+            if text:
+                yield ("final", text)
+
+
+async def hey_events(
+    message: str, session: HeySession | None = None
+) -> AsyncIterator[tuple[str, Any]]:
+    """Führt den Hey_-Flow aus. Yields ("content", str) | ("final", str) | ("done", None).
+
+    "content": Streaming-Delta. "final": vollständiger Text aus dem
+    Abschluss-Objekt (Duplikat der Deltas – bevorzugen, falls vorhanden).
+    Ohne session wird eine eigene Session pro Call geöffnet.
+    """
+    if session is None:
+        async with hey_session() as (client, conversation_id):
+            async for event in _hey_events(client, conversation_id, message):
+                yield event
+    else:
+        async for event in _hey_events(session[0], session[1], message):
+            yield event
     yield ("done", None)
 
 
@@ -501,11 +527,13 @@ def extract_message_text(message: dict) -> str:
     return ""
 
 
-async def hey_full_text(message: str) -> str:
+async def hey_full_text(
+    message: str, session: HeySession | None = None
+) -> str:
     """Sammelt die Hey_-Antwort zu einem String (für Non-Streaming)."""
     parts: list[str] = []
     final: str | None = None
-    async for kind, value in hey_events(message):
+    async for kind, value in hey_events(message, session):
         if kind == "content":
             parts.append(value)
         elif kind == "final":
@@ -513,7 +541,9 @@ async def hey_full_text(message: str) -> str:
     return final if final is not None else "".join(parts)
 
 
-async def summarize_intermediates(jobs: list[str]) -> list[str]:
+async def summarize_intermediates(
+    jobs: list[str], session: HeySession | None = None
+) -> list[str]:
     """Fasst Zwischenjobs zusammen – parallel, Reihenfolge bleibt erhalten.
 
     Die Jobs sind unabhängig voneinander (nur ihre Summaries fließen ins
@@ -521,11 +551,18 @@ async def summarize_intermediates(jobs: list[str]) -> list[str]:
     parallele Calls (siehe Benchmark D).
     """
     if len(jobs) <= 1:
-        return [await hey_full_text(job) for job in jobs]
-    return list(await asyncio.gather(*(hey_full_text(job) for job in jobs)))
+        return [await hey_full_text(job, session) for job in jobs]
+    return list(
+        await asyncio.gather(*(hey_full_text(job, session) for job in jobs))
+    )
 
 
-async def hey_answer(message: str, tools: list | None, user_text: str = "") -> str:
+async def hey_answer(
+    message: str,
+    tools: list | None,
+    user_text: str = "",
+    session: HeySession | None = None,
+) -> str:
     """Holt die Hey_-Antwort, mit je einem Retry bei Ausweichen und News-Drift.
 
     - Ausweichen (Verweigerung/Rückfrage trotz Tools): einmal mit Nudge.
@@ -533,21 +570,21 @@ async def hey_answer(message: str, tools: list | None, user_text: str = "") -> s
       einmal mit Refokus auf die Aufgabe.
     (Abschaltbar via HEY_TOOL_RETRY=0.)
     """
-    answer = await hey_full_text(message)
+    answer = await hey_full_text(message, session)
     if not tools or not HEY_TOOL_RETRY:
         return answer
     _, calls = extract_tool_calls(answer)
     if calls:
         return answer
     if is_deflection(answer):
-        second = await hey_full_text(f"{message}\n\n{TOOL_RETRY_NUDGE}")
+        second = await hey_full_text(f"{message}\n\n{TOOL_RETRY_NUDGE}", session)
         _, calls = extract_tool_calls(second)
         if calls or not is_news_drift(second, user_text):
             return second
         answer = second
     if is_news_drift(answer, user_text):
         return await hey_full_text(
-            f"{message}\n\n{news_refocus_nudge(user_text)}"
+            f"{message}\n\n{news_refocus_nudge(user_text)}", session
         )
     return answer
 
@@ -568,19 +605,21 @@ async def chat_completions(request: Request):
         message_text(m) for m in messages if m.get("role") == "user"
     )
 
-    async def resolve_text() -> str:
+    async def resolve_text(session: HeySession) -> str:
         """Einzel-Request oder Chunk-Queue (FIFO, Summary-Chain).
 
         Passt der Verlauf in einen Request, läuft der normale Pfad.
-        Sonst werden ältere Verlaufsteile sequentiell zusammengefasst und
+        Sonst werden ältere Verlaufsteile parallel zusammengefasst und
         die Zusammenfassungen in den finalen Request eingebettet.
+        Alle Calls teilen sich die Turn-Session (ein Client, eine
+        Hey_-Conversation).
         """
         intermediates, final_parts = build_hey_jobs(
             messages, tools, tool_choice
         )
         if final_parts is None:
             return build_hey_message(messages, tools, tool_choice)
-        summaries = await summarize_intermediates(intermediates)
+        summaries = await summarize_intermediates(intermediates, session)
         return render_final(final_parts, summaries)
 
     def completion_message(answer: str) -> tuple[dict, str]:
@@ -618,9 +657,10 @@ async def chat_completions(request: Request):
         return f"data: {json.dumps(payload)}\n\n"
 
     try:
-        text = await resolve_text()
         if not stream:
-            answer = await hey_answer(text, tools, user_text)
+            async with hey_session() as session:
+                text = await resolve_text(session)
+                answer = await hey_answer(text, tools, user_text, session)
             message, finish = completion_message(answer)
             return JSONResponse({
                 "id": "hey-proxy",
@@ -633,31 +673,38 @@ async def chat_completions(request: Request):
 
         # Mit Tools: erst sammeln (Tool-Calls lassen sich nicht live
         # streamen), dann als Chunks ausgeben. Ohne Tools: live passthrough.
+        # Jede Streaming-Antwort öffnet ihre eigene Turn-Session (der Generator
+        # läuft erst nach Return los – nichts aus dem Endpoint-Scope
+        # wiederverwenden).
         if tools:
             async def generate_buffered():
-                yield chunk(role="assistant")
-                answer = await hey_answer(text, tools, user_text)
-                message, finish = completion_message(answer)
-                if message.get("content"):
-                    yield chunk(content=message["content"])
-                for i, call in enumerate(message.get("tool_calls") or []):
-                    indexed = dict(call, index=i)
-                    yield chunk(tool_calls=[indexed])
-                yield chunk(finish=finish)
-                yield "data: [DONE]\n\n"
+                async with hey_session() as session:
+                    text = await resolve_text(session)
+                    yield chunk(role="assistant")
+                    answer = await hey_answer(text, tools, user_text, session)
+                    message, finish = completion_message(answer)
+                    if message.get("content"):
+                        yield chunk(content=message["content"])
+                    for i, call in enumerate(message.get("tool_calls") or []):
+                        indexed = dict(call, index=i)
+                        yield chunk(tool_calls=[indexed])
+                    yield chunk(finish=finish)
+                    yield "data: [DONE]\n\n"
 
             return StreamingResponse(
                 generate_buffered(), media_type="text/event-stream"
             )
 
         async def generate():
-            yield chunk(role="assistant")
-            async for kind, value in hey_events(text):
-                if kind != "content":
-                    continue
-                yield chunk(content=value)
-            yield chunk(finish="stop")
-            yield "data: [DONE]\n\n"
+            async with hey_session() as session:
+                text = await resolve_text(session)
+                yield chunk(role="assistant")
+                async for kind, value in hey_events(text, session):
+                    if kind != "content":
+                        continue
+                    yield chunk(content=value)
+                yield chunk(finish="stop")
+                yield "data: [DONE]\n\n"
 
         return StreamingResponse(generate(), media_type="text/event-stream")
     except httpx.HTTPError as e:

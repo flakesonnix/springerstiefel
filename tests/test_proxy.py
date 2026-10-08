@@ -24,7 +24,7 @@ FAKE_EVENTS = [
 ]
 
 
-async def fake_hey_events(message: str):
+async def fake_hey_events(message: str, session=None):
     assert "Sag einfach hallo" in message
     for event in FAKE_EVENTS:
         yield event
@@ -33,6 +33,11 @@ async def fake_hey_events(message: str):
 @pytest.fixture(autouse=True)
 def mock_hey_backend(monkeypatch):
     monkeypatch.setattr(proxy, "hey_events", fake_hey_events)
+
+
+# Echte Implementierung (Importzeitpunkt, vor Fixture-Patches) für Tests,
+# die den Session-Fluss bis _hey_events prüfen.
+_REAL_HEY_EVENTS = proxy.hey_events
 
 
 def test_models_lists_hey():
@@ -335,7 +340,7 @@ def test_is_deflection_accepts_normal_text():
 def test_hey_answer_retries_deflection_once():
     calls = {"n": 0}
 
-    async def flaky_events(message: str):
+    async def flaky_events(message: str, session=None):
         calls["n"] += 1
         if calls["n"] == 1:
             yield ("final", "Wobei soll ich im Projekt helfen?")
@@ -357,7 +362,7 @@ def test_hey_answer_retries_deflection_once():
 def test_hey_answer_no_retry_without_tools():
     calls = {"n": 0}
 
-    async def events(message: str):
+    async def events(message: str, session=None):
         calls["n"] += 1
         yield ("final", "Wobei soll ich helfen?")
         yield ("done", None)
@@ -458,7 +463,7 @@ def test_chunked_flow_chains_summaries(monkeypatch):
     monkeypatch.setattr(proxy, "HEY_MAX_CHUNKS", 5)
     seen = []
 
-    async def fake_full_text(message: str):
+    async def fake_full_text(message: str, session=None):
         seen.append(message)
         return f"Summary {len(seen)}"
 
@@ -506,7 +511,7 @@ def test_is_news_drift_skips_genuine_news_requests():
 def test_hey_answer_refocuses_news_drift():
     calls = {"n": 0}
 
-    async def events(message: str):
+    async def events(message: str, session=None):
         calls["n"] += 1
         if calls["n"] == 1:
             yield ("final", "Schlagzeilen des Tages [bild_0_1]")
@@ -529,7 +534,7 @@ def test_hey_answer_refocuses_news_drift():
 
 
 def test_chat_completions_returns_tool_calls():
-    async def tool_events(message: str):
+    async def tool_events(message: str, session=None):
         yield ("final", 'Bitte sehr:\n<<TOOL_CALL>>\n{"name": "get_time", "arguments": {}}\n<<END_TOOL_CALL>>')
         yield ("done", None)
 
@@ -558,7 +563,7 @@ def test_chat_completions_returns_tool_calls():
 
 
 def test_chat_completions_stream_with_tools_emits_tool_chunk():
-    async def tool_events(message: str):
+    async def tool_events(message: str, session=None):
         yield ("content", "Moment…")
         yield ("final", '<<TOOL_CALL>>\n{"name": "get_time", "arguments": {}}\n<<END_TOOL_CALL>>')
         yield ("done", None)
@@ -594,7 +599,7 @@ def test_chat_completions_stream_with_tools_emits_tool_chunk():
 
 
 def test_summarize_intermediates_runs_parallel():
-    async def slow_full_text(message: str):
+    async def slow_full_text(message: str, session=None):
         await asyncio.sleep(0.4)
         return f"Summary of {message}"
 
@@ -612,11 +617,51 @@ def test_summarize_intermediates_runs_parallel():
     assert elapsed < 0.6
 
 
+def test_turn_shares_single_session_across_retry():
+    chats = []
+    sessions = {"entries": 0}
+
+    class FakeSession:
+        async def __aenter__(self):
+            sessions["entries"] += 1
+            return ("fake-client", "cid-1")
+
+        async def __aexit__(self, *args):
+            return False
+
+    async def fake_inner_events(client, conversation_id, message):
+        chats.append((client, conversation_id))
+        if len(chats) == 1:
+            yield ("final", "Wobei soll ich helfen?")
+        else:
+            assert proxy.TOOL_RETRY_NUDGE in message
+            yield ("final", '<<TOOL_CALL>>\n{"name": "write", "arguments": {}}\n<<END_TOOL_CALL>>')
+
+    with unittest.mock.patch.object(proxy, "hey_session", lambda: FakeSession()):
+        with unittest.mock.patch.object(proxy, "_hey_events", fake_inner_events):
+            with unittest.mock.patch.object(proxy, "hey_events", _REAL_HEY_EVENTS):
+                response = client.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "hey",
+                        "messages": MESSAGES,
+                        "tools": [{"type": "function", "function": {"name": "write"}}],
+                    },
+                )
+
+    assert response.status_code == 200
+    # Eine Session/Conversation für den Turn, zwei Chat-Calls darin.
+    assert sessions["entries"] == 1
+    assert chats == [("fake-client", "cid-1"), ("fake-client", "cid-1")]
+    (choice,) = response.json()["choices"]
+    assert choice["finish_reason"] == "tool_calls"
+
+
 def test_summarize_intermediates_single_and_empty():
     async def run():
         assert await proxy.summarize_intermediates([]) == []
         with unittest.mock.patch.object(
-            proxy, "hey_full_text", lambda m: asyncio.sleep(0, result=f"S({m})")
+            proxy, "hey_full_text", lambda m, session=None: asyncio.sleep(0, result=f"S({m})")
         ):
             assert await proxy.summarize_intermediates(["solo"]) == ["S(solo)"]
 

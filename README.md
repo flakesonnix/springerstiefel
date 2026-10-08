@@ -140,6 +140,9 @@ python3 -m pytest -q
 ## Hinweise zum Betrieb
 
 - **Stateless:** Jeder OpenAI-Request bekommt eine frische Hey_-Conversation.
+  Alle Calls eines Turns (Chunks, Retries) teilen sich dabei **eine** Session
+  (ein HTTP-Client + eine Conversation) – spart je Extra-Call einen
+  Conversation-POST (~170 ms).
   Hey_ kennt pro Request nur eine einzelne Message – Verlauf, System-Prompt
   und Tool-Definitionen werden deshalb als Transkript eingebettet
   (`HEY_MAX_HISTORY`, Default: 30 Messages). Nach einem Tool-Roundtrip wird
