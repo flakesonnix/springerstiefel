@@ -1,34 +1,34 @@
 # springerstiefel
 
-Lokaler OpenAI-kompatibler Gateway, um **Hey_ (BILD)** als Modell in
-[OpenCode](https://opencode.ai) zu nutzen:
+A local OpenAI-compatible gateway that exposes **Hey_ (BILD)** as a model in
+[OpenCode](https://opencode.ai):
 
 ```text
 OpenCode
    │  OpenAI API (/v1/chat/completions)
    ▼
-hey-bild-proxy :8787
-   │  bestehende Browser-Session / Cookies
+springerstiefel :8787
+   │  existing browser session / cookies
    ▼
 hey.bild.de
 ```
 
-Hey_ bietet keine öffentliche API an (Backend: Azure OpenAI, aber nur über
-die Website nutzbar). Deshalb spricht der Proxy direkt das Website-Backend
-– ohne Browser, ohne Login, nur per HTTP mit Cookies.
+Hey_ has no public API (Azure OpenAI under the hood, reachable only through
+the website). The proxy therefore talks to the website backend directly –
+no browser, no login, plain HTTP with cookies.
 
-> Stand: Der Proxy ist **live verdrahtet**. `POST /api/conversations`
-> (liefert `conversationId` + `anonid`-Cookie) → `POST /api/chat`
-> (`message` + `source: custom`, Header `x-conversation-id`) → Hey_ antwortet
-> mit OpenAI-artigem SSE, das 1:1 nach `/v1/chat/completions` übersetzt wird.
-> Ermittelt per headless Firefox-Mitschnitt (`data/traffic-auto.jsonl`).
+> Status: the proxy is **fully wired up**. `POST /api/conversations`
+> (returns `conversationId` + `anonid` cookie) → `POST /api/chat`
+> (`message` + `source: custom`, `x-conversation-id` header) → Hey_ replies
+> with OpenAI-style SSE, translated 1:1 to `/v1/chat/completions`.
+> Reverse-engineered via a headless Firefox capture (`data/traffic-auto.jsonl`).
 
-## Voraussetzungen
+## Requirements
 
-- NixOS mit aktivierten Flakes
-- Kein Hey_-Account nötig (anonymer Flow per `anonid`-Cookie)
+- NixOS with flakes enabled
+- No Hey_ account needed (anonymous flow via `anonid` cookie)
 
-## 1. Umgebung einrichten
+## 1. Set up the environment
 
 ```bash
 nix develop
@@ -36,61 +36,60 @@ uv venv .venv && source .venv/bin/activate
 uv pip install -e '.[dev]'
 ```
 
-Die Flake liefert Python 3.11, `uv` sowie die Playwright-Browser (Firefox)
-gepatcht aus nixpkgs. Details:
+The flake provides Python 3.11, `uv`, and Playwright browsers (Firefox)
+patched from nixpkgs. Details:
 
-- `PLAYWRIGHT_BROWSERS_PATH` zeigt auf die nixpkgs-Browser – ein manuelles
-  `playwright install` ist auf NixOS **nicht** nötig und funktioniert dort
-  auch nicht (dynamisch gelinkte Binaries).
-- Playwrights gebündeltes `node` wird beim Shell-Einstieg automatisch auf das
-  nixpkgs-Node umgebogen (nur falls `.venv` schon existiert – ggf. einmal
-  `exit` und erneut `nix develop`).
-- **Version-Pinning:** Die Browser-Revision muss zur Playwright-Version in
-  `pyproject.toml` passen (`playwright>=1.63,<1.64` ↔ `playwright-driver`
-  aus nixpkgs). Nach einem `nix flake update` ggf. in `pyproject.toml`
-  angleichen.
+- `PLAYWRIGHT_BROWSERS_PATH` points at the nixpkgs browsers – a manual
+  `playwright install` is **not** needed on NixOS and doesn't work there
+  anyway (dynamically linked binaries).
+- Playwright's bundled `node` is automatically swapped for the nixpkgs build
+  on shell entry (only once `.venv` exists – re-enter with `exit` +
+  `nix develop` if needed).
+- **Version pinning:** the browser revision must match the Playwright version
+  in `pyproject.toml` (`playwright>=1.63,<1.64` ↔ `playwright-driver`
+  from nixpkgs). After `nix flake update`, align `pyproject.toml` if needed.
 
-## 2. Hey_-Request mitschneiden (bereits erledigt, zum Nachvollziehen)
+## 2. Capturing the Hey_ requests (done, for reference)
 
 ```bash
 hey-capture
 ```
 
-Es öffnet sich Firefox. Dort eine Testnachricht senden
-(z. B. `Sag einfach hallo`), danach Enter im Terminal drücken.
+This opens Firefox. Send a test message there (e.g. `Say hello`), then hit
+Enter in the terminal.
 
-Der gefilterte Traffic landet in `data/traffic.jsonl`, das Browser-Profil in
-`data/browser-firefox/` (beides per `.gitignore` ausgenommen). Der
-Referenz-Mitschnitt liegt unter `data/traffic-auto.jsonl` (headless erstellt,
-Cookie-Banner per „Alle akzeptieren" weggeklickt). Ergebnis:
+Filtered traffic goes to `data/traffic.jsonl`, the browser profile to
+`data/browser-firefox/` (both git-ignored). The reference capture lives at
+`data/traffic-auto.jsonl` (created headless, cookie banner dismissed via
+“Accept all”). Result:
 
 ```text
 POST /api/conversations  {"experienceId": "a5d82531-…"}
   → 201 {"conversationId": "…"} + Set-Cookie: anonid=<JWT>
 POST /api/chat  {"message": "…", "source": "custom"}
   Header: x-conversation-id: <conversationId>
-  → 200 OpenAI-artiges SSE (Modell: gpt-5.4-mini-…, [DONE] am Ende)
+  → 200 OpenAI-style SSE (model: gpt-5.4-mini-…, [DONE] at the end)
 ```
 
-## 3. Proxy starten und in OpenCode einbinden
+## 3. Start the proxy and plug it into OpenCode
 
 ```bash
-hey-proxy   # hört auf 127.0.0.1:8787
+hey-proxy   # listens on 127.0.0.1:8787
 ```
 
-Umgebungsvariablen (optional):
+Optional environment variables:
 
 ```text
-HEY_EXPERIENCE_ID       andere Hey_-Experience (Default: s. Mitschnitt)
-HEY_TIMEOUT             HTTP-Timeout in Sekunden (Default: 120)
-HEY_MAX_HISTORY         max. Verlauf-Messages im Transkript (Default: 30)
-HEY_MAX_TOOL_CHARS      max. Zeichen pro Tool-Ergebnis (Default: 4000)
-HEY_MAX_CHUNK_CHARS     max. Zeichen pro Verlaufschunk (Default: 6000)
-HEY_MAX_CHUNKS          max. Verlaufschunks in der Queue (Default: 5)
-HEY_TOOL_RETRY          1/0 – Retries bei Ausweichen/News-Drift (Default: 1)
+HEY_EXPERIENCE_ID       different Hey_ experience (default: see capture)
+HEY_TIMEOUT             HTTP timeout in seconds (default: 120)
+HEY_MAX_HISTORY         max history messages in the transcript (default: 30)
+HEY_MAX_TOOL_CHARS      max chars per tool result (default: 4000)
+HEY_MAX_CHUNK_CHARS     max chars per history chunk (default: 6000)
+HEY_MAX_CHUNKS          max history chunks in the queue (default: 5)
+HEY_TOOL_RETRY          1/0 – retries on deflection/news drift (default: 1)
 ```
 
-`opencode.json` (aktuelles Format laut [Provider-Doku](https://opencode.ai/docs/providers/)):
+`opencode.json` (current format per the [provider docs](https://opencode.ai/docs/providers/)):
 
 ```jsonc
 {
@@ -107,19 +106,19 @@ HEY_TOOL_RETRY          1/0 – Retries bei Ausweichen/News-Drift (Default: 1)
 }
 ```
 
-Dann prüfen:
+Then verify:
 
 ```bash
 opencode --model hey/hey
 ```
 
-bzw. in OpenCode `/models`. Direkt-Test ohne OpenCode:
+or `/models` inside OpenCode. Direct test without OpenCode:
 
 ```bash
 curl -s http://127.0.0.1:8787/v1/models
 curl -s http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"hey","messages":[{"role":"user","content":"Hallo"}]}'
+  -d '{"model":"hey","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 ## 4. Tests
@@ -128,76 +127,76 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 python3 -m pytest -q
 ```
 
-- `tests/test_proxy.py` – `/v1/models`, Validierung (400 ohne Messages),
-  Non-Streaming-Shape (bevorzugt finalen Text), Streaming-SSE (`role` →
-  `content` → `stop` + `[DONE]`), `last_user_text`, Transkript-Bau
-  (System/Verlauf/Tool-Roundtrip/Fortsetzung), Tool-Sektion + `tool_choice`,
-  `<<TOOL_CALL>>`-Parsing, Tool-Calls in Non-Streaming + Streaming.
-  Das Hey_-Backend ist per `monkeypatch` gemockt – Tests brauchen kein Netz.
-- `tests/test_capture.py` – URL-Filter (`is_interesting_url`): trifft
-  Chat-/API-URLs, ignoriert Static Assets, case-insensitiv.
+- `tests/test_proxy.py` – `/v1/models`, validation (400 without messages),
+  non-streaming shape (prefers final text), streaming SSE (`role` →
+  `content` → `stop` + `[DONE]`), `last_user_text`, transcript building
+  (system/history/tool round-trip/continuation), tool section + `tool_choice`,
+  `<<TOOL_CALL>>` parsing, tool calls in non-streaming + streaming,
+  session sharing, chunk splitting + parallel summaries, retry triggers.
+  The Hey_ backend is mocked via `monkeypatch` – no network needed.
+- `tests/test_capture.py` – URL filter (`is_interesting_url`): matches
+  chat/API URLs, ignores static assets, case-insensitive.
 
-## Hinweise zum Betrieb
+## Runtime notes
 
-- **Stateless:** Jeder OpenAI-Request bekommt eine frische Hey_-Conversation.
-  Alle Calls eines Turns (Chunks, Retries) teilen sich dabei **eine** Session
-  (ein HTTP-Client + eine Conversation) – spart je Extra-Call einen
-  Conversation-POST (~170 ms).
-  Hey_ kennt pro Request nur eine einzelne Message – Verlauf, System-Prompt
-  und Tool-Definitionen werden deshalb als Transkript eingebettet
-  (`HEY_MAX_HISTORY`, Default: 30 Messages). Nach einem Tool-Roundtrip wird
-  zur Fortsetzung aufgefordert statt die Frage zu wiederholen (kein Tool-Loop).
-- **Chunk-Queue bei Oversize:** Passt der Verlauf nicht in einen Request
-  (`HEY_MAX_CHUNK_CHARS` pro Stück), wird er in eine FIFO-Queue gesplittet:
-  ältere Teile werden sequentiell zu 2–3-Satz-Zusammenfassungen verdichtet
-  und ins Finale eingebettet (statt ersatzlos zu droppen). Die Zwischenjobs
-  sind unabhängig und laufen **parallel** (`asyncio.gather`) – die Phase
-  kostet max statt Summe. Es laufen höchstens die neuesten `HEY_MAX_CHUNKS`
-  Verlaufschunks durch – jeder Chunk ist ein eigener Hey_-Call, große
-  Verläufe kosten also Zeit.
-- **Tool-Calls:** `tools`/`tool_choice` werden als Ausgabe-Protokoll
-  (`<<TOOL_CALL>>`-Blöcke mit JSON + ein Beispiel) formuliert und zu
-  OpenAI-`tool_calls` (`finish_reason: tool_calls`) übersetzt. Die
-  Tool-Sektion steht absichtlich am Ende der Message (Recency-Effekt).
-  Ton bewusst sachlich halten: aggressive Imperative („NIEMALS", „MUSST")
-  triggern Hey_'s Guardrail gegen eingebettete Fremd-Anweisungen, dann
-  verweigert das Modell die Blöcke.
-  `tool_choice: "none"` blendet die Sektion aus, `"required"`/konkrete
-  Funktion markiert Pflicht.
-  Mit Tools wird im Streaming-Modus gepuffert (kein Live-Token-Stream),
-  ohne Tools läuft der Hey_-Stream live durch.
-- **Retry bei Ausweichen:** Kommt trotz angebotener Tools kein Tool-Call und
-  sieht die Antwort nach Verweigerung/Rückfrage aus (Muster in `REFUSAL_RES`),
-  wird einmalig mit Nudge wiederholt (`HEY_TOOL_RETRY=0` schaltet ab).
-- **Retry bei News-Drift:** Erkennt der Proxy BILD-Marker (`[bild_0_1]`,
-  „Schlagzeilen", „BILDplus" …) in der Antwort, obwohl keine News gefragt
-  waren, wiederholt er einmal mit Refokus auf die Aufgabe. Echte
-  News-Fragen (Muster in `NEWS_REQUEST_RES`) sind ausgenommen.
-- **Ehrliche Grenze:** Hey_ ist ein News-Verbraucher-Assistent, kein
-  Agent-Modell. Es ruft Tools mal zuverlässig auf, weicht mal auf Rückfragen
-  aus und driftet gelegentlich in den News-Modus ab (Schlagzeilen statt
-  Aktion). Der Proxy macht daraus Best-Effort-Agentenverhalten; für
-  zuverlässiges Agentic-Coding ist das Backend nur bedingt geeignet –
-  für Chat/Erklären/Code-Schreiben als Text ist es solide.
-- Backend-Fehler kommen als `502` mit kurzer Ursache zurück.
-- Hey_ antwortet mal mit plain `content`, mal mit JSON-Hülle
-  `{"answer": ..., "suggestions": ...}` (String oder Dict, in `content`
-  oder `parsed`) – der Proxy extrahiert jeweils `answer`.
+- **Stateless:** every OpenAI request gets a fresh Hey_ conversation.
+  All calls within one turn (chunks, retries) share **a single** session
+  (one HTTP client + one conversation) – saves one conversation POST
+  (~170 ms) per extra call.
+  Hey_ accepts only a single message per request, so history, system prompt,
+  and tool definitions are embedded as a transcript (`HEY_MAX_HISTORY`,
+  default: 30 messages). After a tool round-trip the proxy asks to continue
+  instead of repeating the question (no tool loop).
+- **Chunk queue for oversized prompts:** if the history doesn't fit one
+  request (`HEY_MAX_CHUNK_CHARS` per piece), it is split into a FIFO queue:
+  older parts are condensed into 2–3 sentence summaries and embedded in the
+  final call (instead of being dropped). The intermediate jobs are
+  independent and run **in parallel** (`asyncio.gather`) – the phase costs
+  max instead of sum. At most the newest `HEY_MAX_CHUNKS` history chunks go
+  through – each chunk is its own Hey_ call, so large histories take time.
+- **Tool calls:** `tools`/`tool_choice` are framed as an output protocol
+  (`<<TOOL_CALL>>` blocks with JSON plus one example) and translated to
+  OpenAI `tool_calls` (`finish_reason: tool_calls`). The tool section sits at
+  the end of the message on purpose (recency effect).
+  Keep the tone factual: aggressive imperatives (“NEVER”, “MUST”) trip Hey_'s
+  guardrail against embedded third-party instructions, and the model then
+  refuses the blocks.
+  `tool_choice: "none"` hides the section; `"required"`/a specific function
+  marks the call as mandatory.
+  With tools, streaming mode buffers (no live token stream); without tools
+  the Hey_ stream passes through live.
+- **Retry on deflection:** if tools were offered but no tool call comes back
+  and the answer looks like a refusal/deflection (patterns in `REFUSAL_RES`),
+  it is retried once with a nudge (`HEY_TOOL_RETRY=0` disables it).
+- **Retry on news drift:** if the proxy spots BILD markers (`[bild_0_1]`,
+  “headlines”, “BILDplus” …) although no news was asked for, it retries once
+  refocused on the task. Genuine news questions (patterns in
+  `NEWS_REQUEST_RES`) are exempt.
+- **Honest limitation:** Hey_ is a consumer news assistant, not an agent
+  model. It sometimes calls tools reliably, sometimes deflects to questions,
+  and occasionally drifts into news mode (headlines instead of action). The
+  proxy turns that into best-effort agent behavior; for dependable agentic
+  coding the backend is only partly suitable – for chat, explanations, and
+  writing code as text it is solid.
+- Backend errors surface as `502` with a short cause.
+- Hey_ replies either with plain `content` or a JSON envelope
+  `{"answer": ..., "suggestions": ...}` (string or dict, in `content`
+  or `parsed`) – the proxy always extracts `answer`.
 
-## Projektstruktur
+## Project layout
 
 ```text
-├── flake.nix        # NixOS Dev-Shell (Python, uv, Playwright-Browser)
-├── pyproject.toml   # Paket + dev-Extra (pytest)
-├── capture.py       # Firefox-Mitschnitt → data/traffic.jsonl
-├── proxy.py         # OpenAI-kompatibler Gateway (:8787)
-├── tests/           # pytest-Suite
-└── data/            # Browser-Profil + Mitschnitt (lokal, ignoriert)
+├── flake.nix        # NixOS dev shell (Python, uv, Playwright browsers)
+├── pyproject.toml   # package + dev extra (pytest)
+├── capture.py       # Firefox capture → data/traffic.jsonl
+├── proxy.py         # OpenAI-compatible gateway (:8787)
+├── tests/           # pytest suite
+└── data/            # browser profile + capture (local, ignored)
 ```
 
-## Offene Punkte
+## Open items
 
-- [ ] Echten Coding-Einsatz testen (`opencode --model hey/hey` auf ein
-      kleines Refactoring loslassen, Tool-Loop über mehrere Runden beobachten)
-- [ ] `hey-capture`: Cookie-Banner automatisch wegklicken (wie im
-      Auto-Mitschnitt) statt manuellem Browser
+- [ ] Try a real coding session (`opencode --model hey/hey` on a small
+      refactoring, watch the tool loop over several rounds)
+- [ ] `hey-capture`: dismiss the cookie banner automatically (like the
+      auto-capture does) instead of a manual browser
