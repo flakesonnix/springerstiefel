@@ -10,9 +10,9 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
 
-      # Hinweis: Die Browser-Revision muss zur Playwright-Version in
-      # pyproject.toml passen. Nach `nix flake update` ggf. dort angleichen.
-      # Aktuell: playwright-driver 1.63.0 <-> playwright>=1.63,<1.64.
+      # Note: the browser revision must match the Playwright version in
+      # pyproject.toml. After `nix flake update`, align it there if needed.
+      # Current: playwright-driver 1.63.0 <-> playwright>=1.63,<1.64.
       pipNativeLibs = with pkgs; [
         stdenv.cc.cc.lib
       ];
@@ -22,20 +22,21 @@
         packages = with pkgs; [
           python311
           uv
+          ruff
           playwright-driver
         ];
 
         shellHook = ''
-          # Native pip-Extensions (z.B. greenlet) brauchen libstdc++.
+          # Native pip extensions (e.g. greenlet) need libstdc++.
           export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath pipNativeLibs}:$LD_LIBRARY_PATH"
 
-          # Browser kommen gepatcht aus nixpkgs statt per Download
-          # (`playwright install` läuft auf NixOS nicht: dynamisch gelinktes
-          # node + unpatchte Browser-Binaries).
+          # Browsers come patched from nixpkgs instead of downloads
+          # (`playwright install` doesn't work on NixOS: dynamically linked
+          # node + unpatched browser binaries).
           export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
 
-          # Playwrights gebündeltes node-Binary läuft auf NixOS nicht.
-          # Durch nixpkgs-node ersetzen (ist nur ein node-Interpreter).
+          # Playwright's bundled node binary doesn't run on NixOS.
+          # Replace with the nixpkgs node (it's just a node interpreter).
           if [ -d .venv ]; then
             for target in .venv/lib/python*/site-packages/playwright/driver/node; do
               if [ -f "$target" ] && [ ! -L "$target" ]; then
@@ -46,8 +47,8 @@
           fi
 
           echo "springerstiefel shell – weiter mit:"
-          echo "  uv venv .venv && source .venv/bin/activate   # falls noch nicht geschehen"
-          echo "  uv pip install -e .   # oder: pip install -e ."
+          echo "  uv venv .venv && source .venv/bin/activate   # if not done yet"
+          echo "  uv pip install -e .   # or: pip install -e ."
         '';
       };
     };

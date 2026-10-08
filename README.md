@@ -125,7 +125,7 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 
 ```bash
 python3 -m pytest -q
-python3 -m mypy proxy.py capture.py benchmarks/bench.py
+python3 -m mypy src tests
 ```
 
 Dev loop (reinstall, clean proxy restart, checks, live smoke test):
@@ -212,8 +212,13 @@ handles parallel requests cleanly.
 ```text
 ├── flake.nix        # NixOS dev shell (Python, uv, Playwright browsers)
 ├── pyproject.toml   # package + dev extra (pytest)
-├── capture.py       # Firefox capture → data/traffic.jsonl
-├── proxy.py         # OpenAI-compatible gateway (:8787)
+├── src/springerstiefel/
+│   ├── app.py       # OpenAI-compatible gateway (:8787)
+│   ├── hey.py       # Hey_ backend client (HeyClient)
+│   ├── messages.py  # transcript building + chunk queue
+│   ├── tools.py     # tool-call protocol + drift detection
+│   ├── config.py    # settings + constants
+│   └── capture.py   # Firefox capture → data/traffic.jsonl
 ├── tests/           # pytest suite
 └── data/            # browser profile + capture (local, ignored)
 ```

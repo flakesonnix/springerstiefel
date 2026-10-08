@@ -7,10 +7,14 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-import proxy
+from springerstiefel import config as config_module
+from springerstiefel import hey as hey_module
+from springerstiefel import messages as messages_module
+from springerstiefel import tools as tools_module
+from springerstiefel.app import app
+from springerstiefel.hey import HeyClient
 
-
-client = TestClient(proxy.app)
+client = TestClient(app)
 
 MESSAGES = [
     {"role": "system", "content": "You are a coding assistant."},
@@ -25,7 +29,7 @@ FAKE_EVENTS = [
 ]
 
 
-async def fake_hey_events(message: str, session=None):
+async def fake_hey_events(self, message: str, session=None):
     assert "Sag einfach hallo" in message
     for event in FAKE_EVENTS:
         yield event
@@ -33,12 +37,12 @@ async def fake_hey_events(message: str, session=None):
 
 @pytest.fixture(autouse=True)
 def mock_hey_backend(monkeypatch):
-    monkeypatch.setattr(proxy, "hey_events", fake_hey_events)
+    monkeypatch.setattr(HeyClient, "events", fake_hey_events)
 
 
-# Echte Implementierung (Importzeitpunkt, vor Fixture-Patches) für Tests,
-# die den Session-Fluss bis _hey_events prüfen.
-_REAL_HEY_EVENTS = proxy.hey_events
+# Real implementation (import time, before fixture patches) for tests
+# covering the session flow down to _chat_stream.
+_REAL_HEY_EVENTS = HeyClient.events
 
 
 def test_models_lists_hey():
@@ -121,7 +125,7 @@ def test_last_user_text_takes_last_user_message():
         {"role": "user", "content": "zweite Frage"},
     ]
 
-    assert proxy.last_user_text(messages) == "zweite Frage"
+    assert messages_module.last_user_text(messages) == "zweite Frage"
 
 
 def test_last_user_text_joins_content_parts():
@@ -136,7 +140,7 @@ def test_last_user_text_joins_content_parts():
         }
     ]
 
-    assert proxy.last_user_text(messages) == "Hallo Welt"
+    assert messages_module.last_user_text(messages) == "Hallo Welt"
 
 
 def test_build_hey_message_embeds_system_and_history():
@@ -147,7 +151,7 @@ def test_build_hey_message_embeds_system_and_history():
         {"role": "user", "content": "Und 3+3?"},
     ]
 
-    text = proxy.build_hey_message(messages)
+    text = messages_module.build_hey_message(messages)
 
     assert "[Systemanweisung]\nSei knapp." in text
     assert "Benutzer: Was ist 2+2?" in text
@@ -176,7 +180,7 @@ def test_build_hey_message_renders_tool_roundtrip():
         {"role": "user", "content": "Danke!"},
     ]
 
-    text = proxy.build_hey_message(messages)
+    text = messages_module.build_hey_message(messages)
 
     assert "Assistent (Werkzeugaufruf get_time: {})" in text
     assert "Werkzeugergebnis (call_1): 12:00" in text
@@ -200,11 +204,11 @@ def test_build_hey_message_continues_after_tool_result():
         {"role": "tool", "tool_call_id": "call_1", "content": "12:00"},
     ]
 
-    text = proxy.build_hey_message(messages)
+    text = messages_module.build_hey_message(messages)
 
     # Frage wird NICHT wiederholt (sonst Tool-Loop) …
     assert text.count("Wie spät ist es?") == 1
-    # … stattdessen Fortsetzung mit Ergebnis am Ende.
+    # … continuation with the result at the end instead.
     assert "Werkzeugergebnis (call_1): 12:00" in text
     assert text.endswith(
         "Aktuelle Anweisung:\nSetze die Bearbeitung fort. "
@@ -224,7 +228,7 @@ def test_build_hey_message_lists_tools():
         }
     ]
 
-    text = proxy.build_hey_message(
+    text = messages_module.build_hey_message(
         [{"role": "user", "content": "Lies foo.txt"}], tools
     )
 
@@ -240,7 +244,7 @@ def test_build_hey_message_hides_tools_on_choice_none():
         }
     ]
 
-    text = proxy.build_hey_message(
+    text = messages_module.build_hey_message(
         [{"role": "user", "content": "Hallo"}], tools, tool_choice="none"
     )
 
@@ -256,7 +260,7 @@ def test_build_hey_message_marks_required_call():
         }
     ]
 
-    text = proxy.build_hey_message(
+    text = messages_module.build_hey_message(
         [{"role": "user", "content": "Hallo"}], tools, tool_choice="required"
     )
 
@@ -271,13 +275,13 @@ def test_build_hey_message_escalates_action_requests():
         }
     ]
 
-    text = proxy.build_hey_message(
+    text = messages_module.build_hey_message(
         [{"role": "user", "content": "Erstelle die Datei calc.rs."}], tools
     )
 
     assert "per Aktion zu lösen" in text
 
-    calm = proxy.build_hey_message(
+    calm = messages_module.build_hey_message(
         [{"role": "user", "content": "Was ist Rust?"}], tools
     )
 
@@ -285,10 +289,10 @@ def test_build_hey_message_escalates_action_requests():
 
 
 def test_is_action_request():
-    assert proxy.is_action_request("Erstelle die Datei calc.rs.")
-    assert proxy.is_action_request("Write a program that adds numbers.")
-    assert not proxy.is_action_request("Was ist Rust?")
-    assert not proxy.is_action_request("Erkläre mir Ownership.")
+    assert tools_module.is_action_request("Erstelle die Datei calc.rs.")
+    assert tools_module.is_action_request("Write a program that adds numbers.")
+    assert not tools_module.is_action_request("Was ist Rust?")
+    assert not tools_module.is_action_request("Erkläre mir Ownership.")
 
 
 def test_extract_tool_calls_parses_blocks():
@@ -297,7 +301,7 @@ def test_extract_tool_calls_parses_blocks():
         '"arguments": {"path": "foo.txt"}}\n<<END_TOOL_CALL>>'
     )
 
-    clean, calls = proxy.extract_tool_calls(answer)
+    clean, calls = tools_module.extract_tool_calls(answer)
 
     assert clean == "Gerne!"
     assert calls == [
@@ -315,14 +319,14 @@ def test_extract_tool_calls_parses_blocks():
 def test_extract_tool_calls_keeps_broken_blocks():
     answer = "<<TOOL_CALL>>\nkein json\n<<END_TOOL_CALL>>"
 
-    clean, calls = proxy.extract_tool_calls(answer)
+    clean, calls = tools_module.extract_tool_calls(answer)
 
     assert calls == []
     assert clean == answer
 
 
 def test_extract_message_text_plain_content():
-    assert proxy.extract_message_text({"content": "Hallo!"}) == "Hallo!"
+    assert hey_module.extract_message_text({"content": "Hallo!"}) == "Hallo!"
 
 
 def test_extract_message_text_json_envelope_string():
@@ -332,56 +336,56 @@ def test_extract_message_text_json_envelope_string():
         )
     }
 
-    assert proxy.extract_message_text(message) == "Hier der Code."
+    assert hey_module.extract_message_text(message) == "Hier der Code."
 
 
 def test_extract_message_text_json_envelope_dict():
     message = {"content": {"answer": "Antwort", "suggestions": []}}
 
-    assert proxy.extract_message_text(message) == "Antwort"
+    assert hey_module.extract_message_text(message) == "Antwort"
 
 
 def test_extract_message_text_parsed_fallback():
     message = {"content": "", "parsed": {"answer": "Fallback"}}
 
-    assert proxy.extract_message_text(message) == "Fallback"
+    assert hey_module.extract_message_text(message) == "Fallback"
 
 
 def test_extract_message_text_empty():
-    assert proxy.extract_message_text({}) == ""
-    assert proxy.extract_message_text({"content": ""}) == ""
+    assert hey_module.extract_message_text({}) == ""
+    assert hey_module.extract_message_text({"content": ""}) == ""
 
 
 def test_is_deflection_detects_refusals():
-    assert proxy.is_deflection("Wobei soll ich im Projekt helfen?")
-    assert proxy.is_deflection("Wobei kann ich Ihnen helfen?")
-    assert proxy.is_deflection("Das kann ich hier nicht ausführen.")
-    assert proxy.is_deflection("Nennen Sie bitte Pfad und Inhalt.")
-    assert proxy.is_deflection("Wie kann ich Ihnen helfen?")
-    assert proxy.is_deflection("Ich kann in diesem Schritt keine Datei anlegen.")
-    assert proxy.is_deflection("Meinen Sie einen Rechner oder das Spiel Rust?")
+    assert tools_module.is_deflection("Wobei soll ich im Projekt helfen?")
+    assert tools_module.is_deflection("Wobei kann ich Ihnen helfen?")
+    assert tools_module.is_deflection("Das kann ich hier nicht ausführen.")
+    assert tools_module.is_deflection("Nennen Sie bitte Pfad und Inhalt.")
+    assert tools_module.is_deflection("Wie kann ich Ihnen helfen?")
+    assert tools_module.is_deflection("Ich kann in diesem Schritt keine Datei anlegen.")
+    assert tools_module.is_deflection("Meinen Sie einen Rechner oder das Spiel Rust?")
 
 
 def test_is_deflection_accepts_normal_text():
-    assert not proxy.is_deflection("Hier ist der Code:\n```rust\nfn main() {}```")
-    assert not proxy.is_deflection("Es ist 14:37 Uhr.")
+    assert not tools_module.is_deflection("Hier ist der Code:\n```rust\nfn main() {}```")
+    assert not tools_module.is_deflection("Es ist 14:37 Uhr.")
 
 
 def test_hey_answer_retries_deflection_once():
     calls = {"n": 0}
 
-    async def flaky_events(message: str, session=None):
+    async def flaky_events(self, message: str, session=None):
         calls["n"] += 1
         if calls["n"] == 1:
             yield ("final", "Wobei soll ich im Projekt helfen?")
         else:
-            assert proxy.TOOL_RETRY_NUDGE in message
+            assert tools_module.TOOL_RETRY_NUDGE in message
             yield ("final", '<<TOOL_CALL>>\n{"name": "write", "arguments": {}}\n<<END_TOOL_CALL>>')
         yield ("done", None)
 
     async def run():
-        with unittest.mock.patch.object(proxy, "hey_events", flaky_events):
-            return await proxy.hey_answer("Mach X.", [{"type": "function"}])
+        with unittest.mock.patch.object(HeyClient, "events", flaky_events):
+            return await HeyClient().answer("Mach X.", [{"type": "function"}])
 
     answer = asyncio.run(run())
 
@@ -392,14 +396,14 @@ def test_hey_answer_retries_deflection_once():
 def test_hey_answer_no_retry_without_tools():
     calls = {"n": 0}
 
-    async def events(message: str, session=None):
+    async def events_no_retry(self, message: str, session=None):
         calls["n"] += 1
         yield ("final", "Wobei soll ich helfen?")
         yield ("done", None)
 
     async def run():
-        with unittest.mock.patch.object(proxy, "hey_events", events):
-            return await proxy.hey_answer("Hallo.", None)
+        with unittest.mock.patch.object(HeyClient, "events", events_no_retry):
+            return await HeyClient().answer("Hallo.", None)
 
     answer = asyncio.run(run())
 
@@ -408,14 +412,14 @@ def test_hey_answer_no_retry_without_tools():
 
 
 def test_tool_results_are_truncated(monkeypatch):
-    monkeypatch.setattr(proxy, "HEY_MAX_TOOL_CHARS", 20)
+    monkeypatch.setattr(config_module.settings, "max_tool_chars", 20)
     messages = [
         {"role": "user", "content": "Frage"},
         {"role": "tool", "tool_call_id": "call_1", "content": "x" * 100},
         {"role": "user", "content": "Und?"},
     ]
 
-    text = proxy.build_hey_message(messages)
+    text = messages_module.build_hey_message(messages)
 
     assert ("x" * 100) not in text
     assert "[… Ausgabe gekürzt …]" in text
@@ -425,13 +429,13 @@ def test_tool_results_are_truncated(monkeypatch):
 def test_split_lines_keeps_wholes_lines_in_budget():
     lines = ["aaa", "bbb", "ccccc"]
 
-    chunks = proxy.split_lines(lines, 8)
+    chunks = messages_module.split_lines(lines, 8)
 
     assert chunks == [["aaa", "bbb"], ["ccccc"]]
 
 
 def test_split_lines_empty():
-    assert proxy.split_lines([], 100) == []
+    assert messages_module.split_lines([], 100) == []
 
 
 def test_build_hey_jobs_single_for_small_history():
@@ -441,15 +445,15 @@ def test_build_hey_jobs_single_for_small_history():
         {"role": "user", "content": "Frage neu"},
     ]
 
-    intermediates, final_parts = proxy.build_hey_jobs(messages, None, "auto")
+    intermediates, final_parts = messages_module.build_hey_jobs(messages, None, "auto")
 
     assert intermediates == []
     assert final_parts is None
 
 
 def test_build_hey_jobs_splits_big_history(monkeypatch):
-    monkeypatch.setattr(proxy, "HEY_MAX_CHUNK_CHARS", 40)
-    monkeypatch.setattr(proxy, "HEY_MAX_CHUNKS", 5)
+    monkeypatch.setattr(config_module.settings, "max_chunk_chars", 40)
+    monkeypatch.setattr(config_module.settings, "max_chunks", 5)
     messages = [
         {"role": "user", "content": "erste alte Frage"},
         {"role": "assistant", "content": "alte Antwort"},
@@ -458,9 +462,9 @@ def test_build_hey_jobs_splits_big_history(monkeypatch):
         {"role": "user", "content": "Frage neu"},
     ]
 
-    intermediates, final_parts = proxy.build_hey_jobs(messages, None, "auto")
+    intermediates, final_parts = messages_module.build_hey_jobs(messages, None, "auto")
 
-    # Nichts geht verloren (statt Droppen wie früher) …
+    # Nothing is lost (instead of dropping like before) …
     assert len(intermediates) >= 1
     assert "Teil 1/" in intermediates[0]
     assert "Fasse in 2–3 Sätzen zusammen" in intermediates[0]
@@ -468,41 +472,42 @@ def test_build_hey_jobs_splits_big_history(monkeypatch):
     assert "Frage neu" not in "\n".join(intermediates)
     assert final_parts["current"] == "Frage neu"
 
-    rendered = proxy.render_final(final_parts, ["Zwischenfazit"])
+    rendered = messages_module.render_final(final_parts, ["Zwischenfazit"])
     assert "Zwischenfazit" in rendered
     assert rendered.endswith("Aktuelle Anweisung:\nFrage neu")
 
 
 def test_build_hey_jobs_caps_chunk_count(monkeypatch):
-    monkeypatch.setattr(proxy, "HEY_MAX_CHUNK_CHARS", 10)
-    monkeypatch.setattr(proxy, "HEY_MAX_CHUNKS", 2)
+    monkeypatch.setattr(config_module.settings, "max_chunk_chars", 10)
+    monkeypatch.setattr(config_module.settings, "max_chunks", 2)
     messages = [
         {"role": "user", "content": f"Frage {i} mit viel Text dahinter"}
         for i in range(10)
     ]
     messages.append({"role": "user", "content": "Frage neu"})
 
-    intermediates, final_parts = proxy.build_hey_jobs(messages, None, "auto")
+    intermediates, final_parts = messages_module.build_hey_jobs(messages, None, "auto")
 
     assert len(intermediates) + 1 <= 2
     assert final_parts["current"] == "Frage neu"
 
 
 def test_chunked_flow_chains_summaries(monkeypatch):
-    monkeypatch.setattr(proxy, "HEY_MAX_CHUNK_CHARS", 40)
-    monkeypatch.setattr(proxy, "HEY_MAX_CHUNKS", 5)
+    monkeypatch.setattr(config_module.settings, "max_chunk_chars", 40)
+    monkeypatch.setattr(config_module.settings, "max_chunks", 5)
     seen = []
 
-    async def fake_full_text(message: str, session=None):
+    async def fake_full_text(self, message: str, session=None):
         seen.append(message)
         return f"Summary {len(seen)}"
 
     async def run():
-        with unittest.mock.patch.object(proxy, "hey_full_text", fake_full_text):
+        hey_client = HeyClient()
+        with unittest.mock.patch.object(HeyClient, "full_text", fake_full_text):
             with unittest.mock.patch.object(
-                proxy, "hey_events", fake_hey_events
+                HeyClient, "events", fake_hey_events
             ):
-                intermediates, final_parts = proxy.build_hey_jobs(
+                intermediates, final_parts = messages_module.build_hey_jobs(
                     [
                         {"role": "user", "content": "erste alte Frage"},
                         {"role": "assistant", "content": "alte Antwort"},
@@ -515,8 +520,11 @@ def test_chunked_flow_chains_summaries(monkeypatch):
                 )
                 summaries = []
                 for job in intermediates:
-                    summaries.append(await proxy.hey_full_text(job))
-                return intermediates, proxy.render_final(final_parts, summaries)
+                    summaries.append(await hey_client.full_text(job))
+                return (
+                    intermediates,
+                    messages_module.render_final(final_parts, summaries),
+                )
 
     intermediates, rendered = asyncio.run(run())
 
@@ -528,20 +536,20 @@ def test_chunked_flow_chains_summaries(monkeypatch):
 def test_is_news_drift_detects_headline_dump():
     dump = "## Aktuelle BILD-Schlagzeilen von heute\nPolitik: ... [bild_0_1]"
 
-    assert proxy.is_news_drift(dump, "Erstelle die Datei hello.rs.")
-    assert not proxy.is_news_drift("Hier ist der Code.", "Erstelle hello.rs.")
+    assert tools_module.is_news_drift(dump, "Erstelle die Datei hello.rs.")
+    assert not tools_module.is_news_drift("Hier ist der Code.", "Erstelle hello.rs.")
 
 
 def test_is_news_drift_skips_genuine_news_requests():
     dump = "Schlagzeilen: ... [bild_0_1]"
 
-    assert not proxy.is_news_drift(dump, "Was sind die Nachrichten heute?")
+    assert not tools_module.is_news_drift(dump, "Was sind die Nachrichten heute?")
 
 
 def test_hey_answer_refocuses_news_drift():
     calls = {"n": 0}
 
-    async def events(message: str, session=None):
+    async def events_news(self, message: str, session=None):
         calls["n"] += 1
         if calls["n"] == 1:
             yield ("final", "Schlagzeilen des Tages [bild_0_1]")
@@ -552,8 +560,8 @@ def test_hey_answer_refocuses_news_drift():
         yield ("done", None)
 
     async def run():
-        with unittest.mock.patch.object(proxy, "hey_events", events):
-            return await proxy.hey_answer(
+        with unittest.mock.patch.object(HeyClient, "events", events_news):
+            return await HeyClient().answer(
                 "Mach X.", [{"type": "function"}], "Erstelle hello.rs."
             )
 
@@ -564,11 +572,15 @@ def test_hey_answer_refocuses_news_drift():
 
 
 def test_chat_completions_returns_tool_calls():
-    async def tool_events(message: str, session=None):
-        yield ("final", 'Bitte sehr:\n<<TOOL_CALL>>\n{"name": "get_time", "arguments": {}}\n<<END_TOOL_CALL>>')
+    async def tool_events_returns(self, message: str, session=None):
+        yield (
+            "final",
+            'Bitte sehr:\n<<TOOL_CALL>>\n{"name": "get_time", "arguments": {}}\n'
+            "<<END_TOOL_CALL>>",
+        )
         yield ("done", None)
 
-    with unittest.mock.patch.object(proxy, "hey_events", tool_events):
+    with unittest.mock.patch.object(HeyClient, "events", tool_events_returns):
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -593,12 +605,12 @@ def test_chat_completions_returns_tool_calls():
 
 
 def test_chat_completions_stream_with_tools_emits_tool_chunk():
-    async def tool_events(message: str, session=None):
+    async def tool_events_stream(self, message: str, session=None):
         yield ("content", "Moment…")
         yield ("final", '<<TOOL_CALL>>\n{"name": "get_time", "arguments": {}}\n<<END_TOOL_CALL>>')
         yield ("done", None)
 
-    with unittest.mock.patch.object(proxy, "hey_events", tool_events):
+    with unittest.mock.patch.object(HeyClient, "events", tool_events_stream):
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -629,21 +641,21 @@ def test_chat_completions_stream_with_tools_emits_tool_chunk():
 
 
 def test_summarize_intermediates_runs_parallel():
-    async def slow_full_text(message: str, session=None):
+    async def slow_full_text(self, message: str, session=None):
         await asyncio.sleep(0.4)
         return f"Summary of {message}"
 
     async def run():
-        with unittest.mock.patch.object(proxy, "hey_full_text", slow_full_text):
+        with unittest.mock.patch.object(HeyClient, "full_text", slow_full_text):
             start = time.perf_counter()
-            result = await proxy.summarize_intermediates(["job-a", "job-b"])
+            result = await HeyClient().summarize(["job-a", "job-b"])
             elapsed = time.perf_counter() - start
             return result, elapsed
 
     result, elapsed = asyncio.run(run())
 
     assert result == ["Summary of job-a", "Summary of job-b"]
-    # Sequentiell wären es 0.8s – parallel deutlich darunter.
+    # Sequential would be 0.8s – parallel well below that.
     assert elapsed < 0.6
 
 
@@ -659,17 +671,17 @@ def test_turn_shares_single_session_across_retry():
         async def __aexit__(self, *args):
             return False
 
-    async def fake_inner_events(client, conversation_id, message):
+    async def fake_inner_events(self, client, conversation_id, message):
         chats.append((client, conversation_id))
         if len(chats) == 1:
             yield ("final", "Wobei soll ich helfen?")
         else:
-            assert proxy.TOOL_RETRY_NUDGE in message
+            assert tools_module.TOOL_RETRY_NUDGE in message
             yield ("final", '<<TOOL_CALL>>\n{"name": "write", "arguments": {}}\n<<END_TOOL_CALL>>')
 
-    with unittest.mock.patch.object(proxy, "hey_session", lambda: FakeSession()):
-        with unittest.mock.patch.object(proxy, "_hey_events", fake_inner_events):
-            with unittest.mock.patch.object(proxy, "hey_events", _REAL_HEY_EVENTS):
+    with unittest.mock.patch.object(HeyClient, "session", lambda self: FakeSession()):
+        with unittest.mock.patch.object(HeyClient, "_chat_stream", fake_inner_events):
+            with unittest.mock.patch.object(HeyClient, "events", _REAL_HEY_EVENTS):
                 response = client.post(
                     "/v1/chat/completions",
                     json={
@@ -680,7 +692,7 @@ def test_turn_shares_single_session_across_retry():
                 )
 
     assert response.status_code == 200
-    # Eine Session/Conversation für den Turn, zwei Chat-Calls darin.
+    # One session/conversation for the turn, two chat calls inside.
     assert sessions["entries"] == 1
     assert chats == [("fake-client", "cid-1"), ("fake-client", "cid-1")]
     (choice,) = response.json()["choices"]
@@ -689,31 +701,33 @@ def test_turn_shares_single_session_across_retry():
 
 def test_summarize_intermediates_single_and_empty():
     async def run():
-        assert await proxy.summarize_intermediates([]) == []
+        hey_client = HeyClient()
+        assert await hey_client.summarize([]) == []
         with unittest.mock.patch.object(
-            proxy, "hey_full_text", lambda m, session=None: asyncio.sleep(0, result=f"S({m})")
+            HeyClient, "full_text",
+            lambda self, m, session=None: asyncio.sleep(0, result=f"S({m})"),
         ):
-            assert await proxy.summarize_intermediates(["solo"]) == ["S(solo)"]
+            assert await hey_client.summarize(["solo"]) == ["S(solo)"]
 
     asyncio.run(run())
 
 
 def test_message_text_handles_odd_content():
-    assert proxy.message_text({"role": "user"}) == ""
-    assert proxy.message_text({"role": "user", "content": None}) == ""
-    assert proxy.message_text({"role": "user", "content": 123}) == ""
-    assert proxy.message_text({"role": "user", "content": [{"type": "x"}]}) == ""
+    assert messages_module.message_text({"role": "user"}) == ""
+    assert messages_module.message_text({"role": "user", "content": None}) == ""
+    assert messages_module.message_text({"role": "user", "content": 123}) == ""
+    assert messages_module.message_text({"role": "user", "content": [{"type": "x"}]}) == ""
 
 
 def test_last_user_index_raises_without_user():
     with pytest.raises(HTTPException) as exc:
-        proxy.last_user_index([{"role": "system", "content": "x"}])
+        messages_module.last_user_index([{"role": "system", "content": "x"}])
 
     assert exc.value.status_code == 400
 
 
 def test_news_refocus_nudge_truncates_long_task():
-    nudge = proxy.news_refocus_nudge("x" * 1000)
+    nudge = tools_module.news_refocus_nudge("x" * 1000)
 
     assert nudge.endswith("…]")
     assert "x" * 1000 not in nudge
@@ -723,7 +737,7 @@ def test_news_refocus_nudge_truncates_long_task():
 def test_render_final_variants():
     bare = {"system": None, "lines": [], "current": "Hi", "tools": None}
 
-    assert proxy.render_final(bare, []) == "Aktuelle Anweisung:\nHi"
+    assert messages_module.render_final(bare, []) == "Aktuelle Anweisung:\nHi"
 
     full = {
         "system": "[Systemanweisung]\nSei knapp.",
@@ -731,7 +745,7 @@ def test_render_final_variants():
         "current": "Antworte.",
         "tools": "[Tools]\n<<TOOL_CALL>>",
     }
-    rendered = proxy.render_final(full, [])
+    rendered = messages_module.render_final(full, [])
 
     assert "[Systemanweisung]" in rendered
     assert "Benutzer: Frage" in rendered
@@ -740,7 +754,7 @@ def test_render_final_variants():
 
 
 def test_render_intermediate_numbering():
-    text = proxy.render_intermediate("[Systemanweisung]\nS.", ["a", "b"], 2, 5)
+    text = messages_module.render_intermediate("[Systemanweisung]\nS.", ["a", "b"], 2, 5)
 
     assert "Teil 2/5" in text
     assert text.index("[Systemanweisung]") < text.index("Teil 2/5")
@@ -748,8 +762,8 @@ def test_render_intermediate_numbering():
 
 
 def test_build_hey_jobs_tools_only_in_final(monkeypatch):
-    monkeypatch.setattr(proxy, "HEY_MAX_CHUNK_CHARS", 40)
-    monkeypatch.setattr(proxy, "HEY_MAX_CHUNKS", 5)
+    monkeypatch.setattr(config_module.settings, "max_chunk_chars", 40)
+    monkeypatch.setattr(config_module.settings, "max_chunks", 5)
     tools = [{"type": "function", "function": {"name": "write"}}]
     messages = [
         {"role": "user", "content": "erste alte Frage"},
@@ -759,7 +773,7 @@ def test_build_hey_jobs_tools_only_in_final(monkeypatch):
         {"role": "user", "content": "Frage neu"},
     ]
 
-    intermediates, final_parts = proxy.build_hey_jobs(messages, tools, "auto")
+    intermediates, final_parts = messages_module.build_hey_jobs(messages, tools, "auto")
 
     assert len(intermediates) >= 1
     assert "<<TOOL_CALL>>" not in "\n".join(intermediates)
@@ -791,8 +805,8 @@ def test_hey_session_creates_single_conversation():
             return FakeResponse()
 
     async def run():
-        with unittest.mock.patch.object(proxy.httpx, "AsyncClient", FakeClient):
-            async with proxy.hey_session() as (client, cid):
+        with unittest.mock.patch.object(hey_module.httpx, "AsyncClient", FakeClient):
+            async with HeyClient().session() as (client, cid):
                 assert isinstance(client, FakeClient)
                 return cid
 
@@ -835,24 +849,24 @@ def test_hey_events_skips_garbage_lines():
             return FakeStream(FakeResponse())
 
     async def run():
-        with unittest.mock.patch.object(proxy, "hey_events", _REAL_HEY_EVENTS):
+        with unittest.mock.patch.object(HeyClient, "events", _REAL_HEY_EVENTS):
             return [
                 event
-                async for event in proxy.hey_events("msg", session=(FakeClient(), "cid-1"))
+                async for event in HeyClient().events("msg", session=(FakeClient(), "cid-1"))
             ]
 
     assert asyncio.run(run()) == [("content", "Hi"), ("done", None)]
 
 
 def test_hey_full_text_falls_back_to_joined_deltas():
-    async def deltas_only(message: str, session=None):
+    async def deltas_only(self, message: str, session=None):
         yield ("content", "Hal")
         yield ("content", "lo")
         yield ("done", None)
 
     async def run():
-        with unittest.mock.patch.object(proxy, "hey_events", deltas_only):
-            return await proxy.hey_full_text("msg")
+        with unittest.mock.patch.object(HeyClient, "events", deltas_only):
+            return await HeyClient().full_text("msg")
 
     assert asyncio.run(run()) == "Hallo"
 
@@ -860,12 +874,12 @@ def test_hey_full_text_falls_back_to_joined_deltas():
 def test_tool_choice_none_hides_tools_end_to_end():
     seen = []
 
-    async def recorder(message: str, session=None):
+    async def recorder(self, message: str, session=None):
         seen.append(message)
         for event in FAKE_EVENTS:
             yield event
 
-    with unittest.mock.patch.object(proxy, "hey_events", recorder):
+    with unittest.mock.patch.object(HeyClient, "events", recorder):
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -885,28 +899,28 @@ def test_tool_choice_none_hides_tools_end_to_end():
 def test_is_weather_drift_detects_dump():
     dump = "Aktuell in Berlin: 14,5 °C, Regenwahrscheinlichkeit 68 %."
 
-    assert proxy.is_weather_drift(dump, "Erstelle die Datei hello.rs.")
-    assert not proxy.is_weather_drift("Hier ist der Code.", "Erstelle hello.rs.")
+    assert tools_module.is_weather_drift(dump, "Erstelle die Datei hello.rs.")
+    assert not tools_module.is_weather_drift("Hier ist der Code.", "Erstelle hello.rs.")
 
 
 def test_is_weather_drift_skips_genuine_weather_requests():
     dump = "Aktuell in Berlin: 14,5 °C."
 
-    assert not proxy.is_weather_drift(dump, "Wie ist das Wetter heute?")
-    assert not proxy.is_weather_drift(dump, "Schreibe eine Wetter-App.")
+    assert not tools_module.is_weather_drift(dump, "Wie ist das Wetter heute?")
+    assert not tools_module.is_weather_drift(dump, "Schreibe eine Wetter-App.")
 
 
 def test_drift_kind_mapping():
-    assert proxy.drift_kind("Schlagzeilen [bild_0_1]", "Mach X.") == "news"
-    assert proxy.drift_kind("14 °C, Böen", "Mach X.") == "weather"
-    assert proxy.drift_kind("Hier der Code.", "Mach X.") is None
-    assert proxy.drift_kind("Schlagzeilen!", "Was gibt es Neues?") is None
+    assert tools_module.drift_kind("Schlagzeilen [bild_0_1]", "Mach X.") == "news"
+    assert tools_module.drift_kind("14 °C, Böen", "Mach X.") == "weather"
+    assert tools_module.drift_kind("Hier der Code.", "Mach X.") is None
+    assert tools_module.drift_kind("Schlagzeilen!", "Was gibt es Neues?") is None
 
 
 def test_hey_answer_refocuses_weather_drift():
     calls = {"n": 0}
 
-    async def events(message: str, session=None):
+    async def events_weather(self, message: str, session=None):
         calls["n"] += 1
         if calls["n"] == 1:
             yield ("final", "Aktuell in Berlin: 14,5 °C, Regen.")
@@ -917,8 +931,8 @@ def test_hey_answer_refocuses_weather_drift():
         yield ("done", None)
 
     async def run():
-        with unittest.mock.patch.object(proxy, "hey_events", events):
-            return await proxy.hey_answer(
+        with unittest.mock.patch.object(HeyClient, "events", events_weather):
+            return await HeyClient().answer(
                 "Mach X.", [{"type": "function"}], "Erstelle hello.rs."
             )
 

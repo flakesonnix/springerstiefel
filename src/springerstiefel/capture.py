@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Headless-manual capture of the real Hey_ requests into data/traffic.jsonl."""
 
 import asyncio
 import json
@@ -6,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from playwright.async_api import Request, Response, async_playwright
-
 
 DATA_DIR = Path("data")
 PROFILE_DIR = DATA_DIR / "browser-firefox"
@@ -39,15 +39,15 @@ async def main_async() -> None:
 
         page = context.pages[0] if context.pages else await context.new_page()
 
-        print("[*] Öffne Hey_ …")
+        print("[*] Opening Hey_ …")
         await page.goto("https://hey.bild.de/", wait_until="domcontentloaded")
 
         print()
         print("==============================================")
-        print(" Browser ist offen.")
-        print(" Falls nötig: anmelden.")
-        print(" Danach in Hey_ eine Testnachricht senden.")
-        print(" Beispiel: 'Sag einfach hallo'")
+        print(" Browser is open.")
+        print(" Log in if needed.")
+        print(" Then send a test message in Hey_.")
+        print(" Example: 'Say hello'")
         print("==============================================")
         print()
 
@@ -122,12 +122,12 @@ async def main_async() -> None:
         page.on("request", request_handler)
         page.on("response", response_handler)
 
-        print("[*] Mitschnitt läuft.")
-        print("[*] Drücke Enter, wenn du die Testnachricht abgeschickt hast.")
+        print("[*] Capture running.")
+        print("[*] Press Enter once you sent the test message.")
         await asyncio.to_thread(input)
 
         print()
-        print(f"[*] Traffic gespeichert in: {TRAFFIC_FILE}")
+        print(f"[*] Traffic saved to: {TRAFFIC_FILE}")
 
         await context.close()
 

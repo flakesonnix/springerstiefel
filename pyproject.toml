@@ -14,14 +14,23 @@ dev = [
     "pytest>=8",
     "mypy>=1",
 ]
+# Note: ruff comes from the nix flake (pip ruff binaries don't run on NixOS).
+# Outside nix: pip install ruff
 
 [project.scripts]
-hey-capture = "capture:main"
-hey-proxy = "proxy:main"
+hey-capture = "springerstiefel.capture:main"
+hey-proxy = "springerstiefel.app:main"
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-py-modules = ["capture", "proxy"]
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "UP", "B"]

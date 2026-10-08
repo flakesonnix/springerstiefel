@@ -19,7 +19,12 @@ import time
 
 import httpx
 
-import proxy
+from springerstiefel import config as config_module
+from springerstiefel import messages as messages_module
+from springerstiefel import tools as tools_module
+from springerstiefel.hey import HeyClient, extract_message_text
+
+hey_client = HeyClient()
 
 BASE = "https://hey.bild.de"
 EXP_ID = "a5d82531-015a-46d0-9547-47602fe9b03e"
@@ -61,9 +66,9 @@ def bench_build() -> None:
     for turns, tool_bytes in [(2, 0), (10, 0), (15, 50_000), (15, 200_000)]:
         messages = make_history(turns, tool_bytes)
         t0 = time.perf_counter()
-        text = proxy.build_hey_message(messages)
+        text = messages_module.build_hey_message(messages)
         dt = (time.perf_counter() - t0) * 1000
-        intermediates, final_parts = proxy.build_hey_jobs(messages, None, "auto")
+        intermediates, final_parts = messages_module.build_hey_jobs(messages, None, "auto")
         log(
             f"turns={turns} tool_bytes={tool_bytes}",
             chars=len(text),
@@ -78,7 +83,7 @@ async def timed_flow(label: str, hey_message: str) -> dict:
     phases: dict = {}
     t_total = time.perf_counter()
     async with httpx.AsyncClient(
-        base_url=BASE, headers=proxy.BROWSER_HEADERS, timeout=120.0
+        base_url=BASE, headers=config_module.BROWSER_HEADERS, timeout=120.0
     ) as client:
         t0 = time.perf_counter()
         conv = await client.post("/api/conversations", json={"experienceId": EXP_ID})
@@ -129,13 +134,13 @@ async def bench_live() -> None:
     print("=" * 70)
     print("B. Live Hey_ phases (small / medium / large)")
     print("=" * 70)
-    small = proxy.build_hey_message([{"role": "user", "content": "Say hello."}])
+    small = messages_module.build_hey_message([{"role": "user", "content": "Say hello."}])
     await timed_flow("small (1 msg)", small)
 
-    medium = proxy.build_hey_message(make_history(10))
+    medium = messages_module.build_hey_message(make_history(10))
     await timed_flow("medium (10 turns)", medium)
 
-    big = proxy.build_hey_message(make_history(10, tool_bytes=100_000))
+    big = messages_module.build_hey_message(make_history(10, tool_bytes=100_000))
     await timed_flow("large (10 turns + 100KB tool)", big)
 
 
@@ -143,37 +148,40 @@ async def bench_chunked() -> None:
     print("=" * 70)
     print("C. Chunk queue (forced small, via summarize_intermediates)")
     print("=" * 70)
-    old_chars, old_chunks = proxy.HEY_MAX_CHUNK_CHARS, proxy.HEY_MAX_CHUNKS
-    proxy.HEY_MAX_CHUNK_CHARS, proxy.HEY_MAX_CHUNKS = 400, 6
+    old_chars = config_module.settings.max_chunk_chars
+    old_chunks = config_module.settings.max_chunks
+    config_module.settings.max_chunk_chars = 400
+    config_module.settings.max_chunks = 6
     try:
         messages = make_history(8)
-        intermediates, final_parts = proxy.build_hey_jobs(messages, None, "auto")
+        intermediates, final_parts = messages_module.build_hey_jobs(messages, None, "auto")
         assert final_parts is not None  # forced-small budget always splits
         log("jobs", intermediates=len(intermediates), final=True)
         t0 = time.perf_counter()
-        summaries = await proxy.summarize_intermediates(intermediates)
+        summaries = await hey_client.summarize(intermediates)
         log("parallel-phase", ms=f"{(time.perf_counter() - t0) * 1000:.0f}")
-        final = proxy.render_final(final_parts, summaries)
+        final = messages_module.render_final(final_parts, summaries)
         t1 = time.perf_counter()
-        answer = await proxy.hey_full_text(final)
+        answer = await hey_client.full_text(final)
         log("final",
             ms=f"{(time.perf_counter() - t1) * 1000:.0f}",
             answer=answer[:120])
         log("chunked-total", ms=f"{(time.perf_counter() - t0) * 1000:.0f}")
     finally:
-        proxy.HEY_MAX_CHUNK_CHARS, proxy.HEY_MAX_CHUNKS = old_chars, old_chunks
+        config_module.settings.max_chunk_chars = old_chars
+        config_module.settings.max_chunks = old_chunks
 
 
 async def bench_concurrent() -> None:
     print("=" * 70)
     print("D. Concurrency (3 parallel small requests)")
     print("=" * 70)
-    small = proxy.build_hey_message([{"role": "user", "content": "Say hello."}])
+    small = messages_module.build_hey_message([{"role": "user", "content": "Say hello."}])
     t0 = time.perf_counter()
 
     async def one(i: int) -> None:
         t1 = time.perf_counter()
-        answer = await proxy.hey_full_text(small)
+        answer = await hey_client.full_text(small)
         log(f"request {i}", ms=f"{(time.perf_counter() - t1) * 1000:.0f}",
             answer=answer[:40])
 
@@ -196,24 +204,24 @@ def bench_micro() -> None:
     print("E. Micro-benchmarks (offline, best of 20)")
     print("=" * 70)
     history = make_history(30, tool_bytes=50_000)
-    text = proxy.build_hey_message(history)
+    text = messages_module.build_hey_message(history)
     log("fixture", history_messages=len(history), message_chars=len(text))
 
-    best_of("build_hey_message (30 turns)", 20, proxy.build_hey_message, history)
-    best_of("build_hey_jobs (30 turns)", 20, proxy.build_hey_jobs,
+    best_of("build_hey_message (30 turns)", 20, messages_module.build_hey_message, history)
+    best_of("build_hey_jobs (30 turns)", 20, messages_module.build_hey_jobs,
             history, None, "auto")
 
     blocky = ("Text.\n<<TOOL_CALL>>\n"
               '{"name": "write", "arguments": {"path": "f.txt", "content": "x"}}'
               "\n<<END_TOOL_CALL>>\n") * 50
-    best_of("extract_tool_calls (50 blocks)", 20, proxy.extract_tool_calls, blocky)
+    best_of("extract_tool_calls (50 blocks)", 20, tools_module.extract_tool_calls, blocky)
 
     envelope = json.dumps({"answer": "A" * 5000, "suggestions": ["a", "b"]})
     best_of("extract_message_text (5KB envelope)", 20,
-            proxy.extract_message_text, {"content": envelope})
+            extract_message_text, {"content": envelope})
 
     many_lines = [f"line {i}: {'y' * 200}" for i in range(500)]
-    best_of("split_lines (500 lines)", 20, proxy.split_lines, many_lines, 6000)
+    best_of("split_lines (500 lines)", 20, messages_module.split_lines, many_lines, 6000)
 
 
 async def main() -> None:

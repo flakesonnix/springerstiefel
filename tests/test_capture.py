@@ -1,4 +1,4 @@
-import capture
+from springerstiefel import capture
 
 
 def test_matches_chat_api_requests():
