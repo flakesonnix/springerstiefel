@@ -110,8 +110,35 @@ TOOL_INSTRUCTIONS = (
     f"{TOOL_CALL_START}\n"
     '{"name": "write", "arguments": {"path": "hello.txt", "content": "Hi"}}\n'
     f"{TOOL_CALL_END}\n"
-    "Wenn keine Aktion nötig ist, antworte normal mit Fließtext."
+    "Bevorzugung: Ist die Aufgabe per Aktion lösbar (Datei erstellen/lesen/"
+    "ändern, Befehl ausführen, suchen), nutze IMMER den Block statt "
+    "Fließtext. Fließtext nur für Erklärungen und Antworten ohne Aktion."
 )
+
+
+# Bitten, die eindeutig eine Aktion (statt Text) verlangen – dann eskaliert
+# der Proxy auf Pflicht-Ton.
+ACTION_REQUEST_RES: list[re.Pattern[str]] = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"erstelle .* datei",
+        r"erstellen .* datei",
+        r"schreibe .* (datei|programm|code)",
+        r"lege .* datei an",
+        r"speichere .* (in|als|unter)",
+        r"führe .* aus",
+        r"kompiliere",
+        r"create .* file",
+        r"write .* (file|program|code)",
+        r"save .* (to|as|in)",
+        r"\brun\b.*(test|build|command)",
+    )
+]
+
+
+def is_action_request(user_text: str) -> bool:
+    """True, wenn der Nutzer eindeutig eine Aktion (keinen Text) will."""
+    return any(pattern.search(user_text) for pattern in ACTION_REQUEST_RES)
 
 
 def _message_parts(
@@ -182,12 +209,20 @@ def _message_parts(
             + "\n\n[Regel für Aktionen]\n"
             + TOOL_INSTRUCTIONS
         )
-        if tool_choice == "required" or (
-            isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
+        user_texts = " ".join(
+            message_text(m) for m in messages if m.get("role") == "user"
+        )
+        if (
+            tool_choice == "required"
+            or (
+                isinstance(tool_choice, dict)
+                and tool_choice.get("type") == "function"
+            )
+            or is_action_request(user_texts)
         ):
             tool_section += (
-                "\nWICHTIG: Du MUSST in dieser Antwort mindestens eine Aktion "
-                "auslösen – Fließtext allein genügt nicht."
+                "\nWICHTIG: Diese Aufgabe ist per Aktion zu lösen – "
+                "antworte mit Aktions-Blöcken statt Fließtext."
             )
 
     return system_section, lines, current, tool_section
@@ -336,6 +371,7 @@ REFUSAL_RES: list[re.Pattern[str]] = [
         r"brauche .* (mehr|weitere|genauere)",
         r"nennen sie (bitte )?(pfad|datei|inhalt)",
         r"sagen sie (mir )?(bitte )?(was|welche)",
+        r"meinen sie",
         r"welche datei",
         r"how can i help",
         r"i can('|no)t",

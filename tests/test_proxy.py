@@ -260,7 +260,35 @@ def test_build_hey_message_marks_required_call():
         [{"role": "user", "content": "Hallo"}], tools, tool_choice="required"
     )
 
-    assert "MUSST" in text
+    assert "per Aktion zu lösen" in text
+
+
+def test_build_hey_message_escalates_action_requests():
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "write"},
+        }
+    ]
+
+    text = proxy.build_hey_message(
+        [{"role": "user", "content": "Erstelle die Datei calc.rs."}], tools
+    )
+
+    assert "per Aktion zu lösen" in text
+
+    calm = proxy.build_hey_message(
+        [{"role": "user", "content": "Was ist Rust?"}], tools
+    )
+
+    assert "per Aktion zu lösen" not in calm
+
+
+def test_is_action_request():
+    assert proxy.is_action_request("Erstelle die Datei calc.rs.")
+    assert proxy.is_action_request("Write a program that adds numbers.")
+    assert not proxy.is_action_request("Was ist Rust?")
+    assert not proxy.is_action_request("Erkläre mir Ownership.")
 
 
 def test_extract_tool_calls_parses_blocks():
@@ -331,6 +359,7 @@ def test_is_deflection_detects_refusals():
     assert proxy.is_deflection("Nennen Sie bitte Pfad und Inhalt.")
     assert proxy.is_deflection("Wie kann ich Ihnen helfen?")
     assert proxy.is_deflection("Ich kann in diesem Schritt keine Datei anlegen.")
+    assert proxy.is_deflection("Meinen Sie einen Rechner oder das Spiel Rust?")
 
 
 def test_is_deflection_accepts_normal_text():

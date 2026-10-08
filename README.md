@@ -182,7 +182,10 @@ handles parallel requests cleanly.
   guardrail against embedded third-party instructions, and the model then
   refuses the blocks.
   `tool_choice: "none"` hides the section; `"required"`/a specific function
-  marks the call as mandatory.
+  marks the call as mandatory. Explicit file/action requests
+  (“create the file X”, “write the program …”, patterns in
+  `ACTION_REQUEST_RES`) escalate to the same mandatory tone, since those
+  can only be fulfilled via a tool call.
   With tools, streaming mode buffers (no live token stream); without tools
   the Hey_ stream passes through live.
 - **Retry on deflection:** if tools were offered but no tool call comes back
