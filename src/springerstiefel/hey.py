@@ -213,6 +213,27 @@ class HeyClient:
             self._resolved_experience_id = DEFAULT_EXPERIENCE_ID
         return self._resolved_experience_id
 
+    async def warmup(self) -> None:
+        """Resolve the experience eagerly (server startup).
+
+        Saves one GET /api/home on the first turn (and its TTFT), and
+        primes the pooled transport. Never raises – worst case the first
+        turn resolves lazily as before.
+        """
+        try:
+            client = httpx.AsyncClient(
+                transport=shared_transport(),
+                base_url=settings.base_url,
+                headers=BROWSER_HEADERS,
+                timeout=settings.timeout,
+            )
+            try:
+                await self.resolve_experience_id(client)
+            finally:
+                await client.aclose()
+        except Exception:
+            pass
+
     @asynccontextmanager
     async def session(self) -> AsyncIterator[HeySession]:
         async with httpx.AsyncClient(

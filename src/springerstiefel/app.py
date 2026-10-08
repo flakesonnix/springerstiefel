@@ -4,6 +4,7 @@ import json
 import os
 import time
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import httpx
 import uvicorn
@@ -20,7 +21,14 @@ hey = HeyClient()
 
 DEBUG = os.environ.get("HEY_DEBUG", "0") == "1"
 
-app = FastAPI(title="springerstiefel")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    await hey.warmup()
+    yield
+
+
+app = FastAPI(title="springerstiefel", lifespan=lifespan)
 
 
 def debug_log(**fields: object) -> None:

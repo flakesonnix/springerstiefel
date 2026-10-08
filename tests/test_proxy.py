@@ -1392,3 +1392,81 @@ def test_turn_session_respects_ttl_and_switch(monkeypatch):
         result = run_turns(HeyClient(), [msgs1, msgs2])
 
     assert [reused for _, reused in result] == [False, False]
+
+
+def test_chunked_turn_uses_single_conversation(monkeypatch):
+    monkeypatch.setattr(config_module.settings, "max_chunk_chars", 40)
+    monkeypatch.setattr(config_module.settings, "max_chunks", 5)
+    seen_cids = []
+
+    async def fake_stream(self, client, conversation_id, message):
+        seen_cids.append(conversation_id)
+        yield ("final", "ok")
+
+    messages = [
+        {"role": "user", "content": "erste alte Frage"},
+        {"role": "assistant", "content": "alte Antwort"},
+        {"role": "user", "content": "noch eine Frage"},
+        {"role": "assistant", "content": "noch eine Antwort"},
+        {"role": "user", "content": "Frage neu"},
+    ]
+
+    async def run():
+        hey_client = HeyClient()
+        session: tuple = ("fake-client", "cid-shared")
+        with unittest.mock.patch.object(HeyClient, "_chat_stream", fake_stream):
+            with unittest.mock.patch.object(HeyClient, "events", _REAL_HEY_EVENTS):
+                intermediates, final_parts = messages_module.build_hey_jobs(
+                    messages, None, "auto"
+                )
+                assert len(intermediates) >= 1
+                summaries = await hey_client.summarize(intermediates, session)
+                final = messages_module.render_final(final_parts, summaries)
+                await hey_client.answer(final, None, "", session)
+
+    asyncio.run(run())
+
+    assert len(seen_cids) >= 2
+    assert set(seen_cids) == {"cid-shared"}
+
+
+def test_warmup_resolves_once(monkeypatch):
+    gets = []
+
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"experienceId": "id-warm", "slug": "x"}]}
+
+    class FakeWarmClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def aclose(self):
+            return None
+
+        async def get(self, url, **kwargs):
+            gets.append(url)
+            return FakeResp()
+
+    async def run():
+        with unittest.mock.patch.object(
+            hey_module.httpx, "AsyncClient", FakeWarmClient
+        ):
+            client = HeyClient()
+            await client.warmup()
+            await client.warmup()
+            return client
+
+    client = asyncio.run(run())
+
+    assert gets == ["/api/home"]
+    assert client._resolved_experience_id == "id-warm"

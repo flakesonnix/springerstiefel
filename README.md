@@ -95,7 +95,8 @@ HEY_DEBUG               1 – per-turn timing log (default: 0)
 
 Without `HEY_EXPERIENCE_ID`, the proxy picks a usable chat experience from
 `GET /api/home` automatically (preferred slug first, then any enabled chat
-experience), falling back to the last known default.
+experience), falling back to the last known default. The lookup happens once
+at server startup (lifespan warmup), so no turn pays for it.
 
 `opencode.json` (current format per the [provider docs](https://opencode.ai/docs/providers/)):
 
