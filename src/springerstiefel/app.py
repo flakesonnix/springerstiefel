@@ -8,6 +8,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from springerstiefel import hey as hey_module
 from springerstiefel import messages, tools
 from springerstiefel.hey import HeyClient, HeySession
 from springerstiefel.messages import message_text
@@ -109,8 +110,12 @@ async def chat_completions(
         if not stream:
             async with hey.session() as session:
                 text = await resolve_text(session)
-                answer = await hey.answer(text, tool_defs, user_text, session)
-            message, finish = completion_message(answer)
+                answer, sources = await hey.answer(
+                    text, tool_defs, user_text, session
+                )
+            message, finish = completion_message(
+                hey_module.append_sources(answer, sources)
+            )
             return JSONResponse({
                 "id": "hey-proxy",
                 "object": "chat.completion",
@@ -129,10 +134,12 @@ async def chat_completions(
                 async with hey.session() as session:
                     text = await resolve_text(session)
                     yield chunk(role="assistant")
-                    answer = await hey.answer(
+                    answer, sources = await hey.answer(
                         text, tool_defs, user_text, session
                     )
-                    message, finish = completion_message(answer)
+                    message, finish = completion_message(
+                        hey_module.append_sources(answer, sources)
+                    )
                     if message.get("content"):
                         yield chunk(content=message["content"])
                     for i, call in enumerate(message.get("tool_calls") or []):
@@ -149,10 +156,17 @@ async def chat_completions(
             async with hey.session() as session:
                 text = await resolve_text(session)
                 yield chunk(role="assistant")
+                seen_text: list[str] = []
+                by_index: hey_module.Sources = {}
                 async for kind, value in hey.events(text, session):
-                    if kind != "content":
-                        continue
-                    yield chunk(content=value)
+                    if kind == "content":
+                        seen_text.append(value)
+                        yield chunk(content=value)
+                    elif kind == "sources":
+                        by_index.update(value)
+                section = hey_module.resolve_sources("".join(seen_text), by_index)
+                if section:
+                    yield chunk(content=hey_module.format_sources(section))
                 yield chunk(finish="stop")
                 yield "data: [DONE]\n\n"
 

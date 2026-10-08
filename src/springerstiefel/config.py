@@ -21,7 +21,11 @@ class Settings:
     """All tunables, overridable via environment (see README)."""
 
     base_url: str = HEY_BASE
-    experience_id: str = DEFAULT_EXPERIENCE_ID
+    # Explicit experience override. When None (default), the client picks a
+    # usable chat experience from GET /api/home automatically.
+    experience_id: str | None = None
+    # Preferred experience slug for auto-pick (substring match, optional).
+    experience_slug: str = ""
     timeout: float = 120.0
     max_history: int = 30
     max_tool_chars: int = 4000
@@ -33,7 +37,8 @@ class Settings:
 def load_settings() -> Settings:
     """Build settings from the environment."""
     return Settings(
-        experience_id=os.environ.get("HEY_EXPERIENCE_ID", DEFAULT_EXPERIENCE_ID),
+        experience_id=os.environ.get("HEY_EXPERIENCE_ID"),
+        experience_slug=os.environ.get("HEY_EXPERIENCE_SLUG", ""),
         timeout=float(os.environ.get("HEY_TIMEOUT", "120")),
         max_history=int(os.environ.get("HEY_MAX_HISTORY", "30")),
         max_tool_chars=int(os.environ.get("HEY_MAX_TOOL_CHARS", "4000")),

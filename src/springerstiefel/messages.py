@@ -8,9 +8,16 @@ import json
 
 from fastapi import HTTPException
 
-from springerstiefel import tools
+from springerstiefel import language, tools
 from springerstiefel.config import settings
 from springerstiefel.types import FinalParts, JsonDict, Message, ToolChoice
+
+
+def prompt_language(messages: list[Message]) -> str:
+    """Detect the prompt language from the last user message ("en"/"de")."""
+    return language.detect_language(
+        message_text(messages[last_user_index(messages)])
+    )
 
 
 def message_text(message: Message) -> str:
@@ -148,7 +155,10 @@ def build_hey_message(
         )
         if s
     ]
-    return "\n\n".join(sections)
+    text = "\n\n".join(sections)
+    if prompt_language(messages) == "en":
+        text += "\n\n" + language.LANGUAGE_DIRECTIVE
+    return text
 
 
 def split_lines(lines: list[str], max_chars: int) -> list[list[str]]:
@@ -169,7 +179,11 @@ def split_lines(lines: list[str], max_chars: int) -> list[list[str]]:
 
 
 def render_intermediate(
-    system_section: str | None, lines: list[str], part: int, total: int
+    system_section: str | None,
+    lines: list[str],
+    part: int,
+    total: int,
+    lang: str = "de",
 ) -> str:
     head = f"[Gesprächsverlauf Teil {part}/{total} – lies ihn, antworte noch nicht]\n"
     sections = [
@@ -177,6 +191,11 @@ def render_intermediate(
         for s in (system_section, head + "\n".join(lines))
         if s
     ]
+    if lang == "en":
+        return "\n\n".join(sections) + (
+            "\n\nSummarize in 2-3 sentences what matters for what follows. "
+            "Reply with only the summary."
+        )
     return "\n\n".join(sections) + (
         "\n\nFasse in 2–3 Sätzen zusammen, was für die weitere Bearbeitung "
         "wichtig ist. Antworte nur mit der Zusammenfassung."
@@ -205,7 +224,10 @@ def render_final(parts: FinalParts, summaries: list[str]) -> str:
         )
         if s
     ]
-    return "\n\n".join(sections)
+    text = "\n\n".join(sections)
+    if parts.get("lang") == "en":
+        text += "\n\n" + language.LANGUAGE_DIRECTIVE
+    return text
 
 
 def build_hey_jobs(
@@ -229,8 +251,9 @@ def build_hey_jobs(
     if len(chunks) <= 1:
         return [], None
     total = len(chunks)
+    lang = prompt_language(messages)
     intermediates = [
-        render_intermediate(system_section, chunk, i + 1, total)
+        render_intermediate(system_section, chunk, i + 1, total, lang)
         for i, chunk in enumerate(chunks[:-1])
     ]
     final_parts: FinalParts = {
@@ -238,5 +261,6 @@ def build_hey_jobs(
         "lines": chunks[-1],
         "current": current,
         "tools": tool_section,
+        "lang": lang,
     }
     return intermediates, final_parts

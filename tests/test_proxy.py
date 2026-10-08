@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from springerstiefel import config as config_module
 from springerstiefel import hey as hey_module
+from springerstiefel import language as language_module
 from springerstiefel import messages as messages_module
 from springerstiefel import tools as tools_module
 from springerstiefel.app import app
@@ -387,10 +388,11 @@ def test_hey_answer_retries_deflection_once():
         with unittest.mock.patch.object(HeyClient, "events", flaky_events):
             return await HeyClient().answer("Mach X.", [{"type": "function"}])
 
-    answer = asyncio.run(run())
+    answer, sources = asyncio.run(run())
 
     assert calls["n"] == 2
     assert "TOOL_CALL" in answer
+    assert sources == {}
 
 
 def test_hey_answer_no_retry_without_tools():
@@ -405,10 +407,11 @@ def test_hey_answer_no_retry_without_tools():
         with unittest.mock.patch.object(HeyClient, "events", events_no_retry):
             return await HeyClient().answer("Hallo.", None)
 
-    answer = asyncio.run(run())
+    answer, sources = asyncio.run(run())
 
     assert calls["n"] == 1
     assert answer == "Wobei soll ich helfen?"
+    assert sources == {}
 
 
 def test_tool_results_are_truncated(monkeypatch):
@@ -565,7 +568,7 @@ def test_hey_answer_refocuses_news_drift():
                 "Mach X.", [{"type": "function"}], "Erstelle hello.rs."
             )
 
-    answer = asyncio.run(run())
+    answer, _ = asyncio.run(run())
 
     assert calls["n"] == 2
     assert answer == "Erledigt."
@@ -936,7 +939,117 @@ def test_hey_answer_refocuses_weather_drift():
                 "Mach X.", [{"type": "function"}], "Erstelle hello.rs."
             )
 
-    answer = asyncio.run(run())
+    answer, _ = asyncio.run(run())
 
     assert calls["n"] == 2
     assert answer == "Erledigt."
+
+
+def test_detect_language():
+    assert language_module.detect_language("Write a calculator in rust.") == "en"
+    assert language_module.detect_language("Erstelle die Datei calc.rs.") == "de"
+    assert language_module.detect_language("") == "de"
+    assert language_module.detect_language("fn main() {}") == "de"
+    assert language_module.detect_language("Hallo Welt") == "de"
+
+
+def test_build_hey_message_adds_directive_for_english():
+    text = messages_module.build_hey_message(
+        [{"role": "user", "content": "Write a calculator in rust."}]
+    )
+
+    assert "Reply in English" in text
+    assert text.rstrip().endswith("Reply in English, including code comments.")
+
+
+def test_build_hey_message_no_directive_for_german():
+    text = messages_module.build_hey_message(
+        [{"role": "user", "content": "Sag einfach hallo."}]
+    )
+
+    assert "Reply in English" not in text
+
+
+def test_render_intermediate_english_instruction():
+    text = messages_module.render_intermediate(None, ["a"], 1, 2, lang="en")
+
+    assert "Summarize in 2-3 sentences" in text
+    assert "Fasse in" not in text
+
+
+def test_extract_sources_from_delta():
+    delta = {
+        "sources": [
+            {"index": "bild_0_1", "title": "Titel", "url": "https://x.test/1"},
+            {"index": "broken"},
+            "nonsense",
+        ]
+    }
+
+    assert hey_module.extract_sources(delta) == {
+        "bild_0_1": {"title": "Titel", "url": "https://x.test/1"}
+    }
+    assert hey_module.extract_sources({}) == {}
+
+
+def test_resolve_sources_order_and_fallback():
+    sources = {
+        "bild_0_0": {"title": "Erster", "url": "https://x.test/0"},
+        "bild_0_1": {"title": "Zweiter", "url": "https://x.test/1"},
+    }
+    text = "Siehe [bild_0_1] und [bild_0_1] sowie [bild_0_0:image_0] und [web_9]."
+
+    resolved = hey_module.resolve_sources(text, sources)
+
+    assert resolved == [
+        ("bild_0_1", "Zweiter", "https://x.test/1"),
+        ("bild_0_0:image_0", "Erster", "https://x.test/0"),
+    ]
+
+
+def test_append_sources_only_when_resolved():
+    assert hey_module.append_sources("Hallo!", {}) == "Hallo!"
+    assert hey_module.append_sources("Siehe [web_9].", {}) == "Siehe [web_9]."
+
+    text = hey_module.append_sources(
+        "Siehe [bild_0_1].",
+        {"bild_0_1": {"title": "Titel", "url": "https://x.test/1"}},
+    )
+
+    assert "Quellen:" in text
+    assert "[bild_0_1] [Titel](https://x.test/1)" in text
+
+
+def test_chat_completions_appends_quellen():
+    async def sourced_events(self, message: str, session=None):
+        yield ("sources", {"bild_0_1": {"title": "Titel", "url": "https://x.test/1"}})
+        yield ("final", "Siehe [bild_0_1].")
+        yield ("done", None)
+
+    with unittest.mock.patch.object(HeyClient, "events", sourced_events):
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "hey", "messages": MESSAGES},
+        )
+
+    assert response.status_code == 200
+    content = response.json()["choices"][0]["message"]["content"]
+    assert "[bild_0_1] [Titel](https://x.test/1)" in content
+
+
+def test_pick_experience_prefers_chat_and_slug(monkeypatch):
+    items = [
+        {"experienceId": "id-disabled", "slug": "x", "isTextInputDisabled": True},
+        {"experienceId": "id-chat", "slug": "toll", "interactionMode": "chat"},
+        {"experienceId": "id-other", "slug": "y"},
+    ]
+
+    assert hey_module.pick_experience(items) == "id-chat"
+
+    monkeypatch.setattr(config_module.settings, "experience_slug", "y")
+    assert hey_module.pick_experience(items) == "id-other"
+
+    assert hey_module.pick_experience([]) == config_module.DEFAULT_EXPERIENCE_ID
+    assert hey_module.pick_experience([{"slug": "no-id"}]) == (
+        config_module.DEFAULT_EXPERIENCE_ID
+    )

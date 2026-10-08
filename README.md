@@ -80,7 +80,8 @@ hey-proxy   # listens on 127.0.0.1:8787
 Optional environment variables:
 
 ```text
-HEY_EXPERIENCE_ID       different Hey_ experience (default: see capture)
+HEY_EXPERIENCE_ID       pin a Hey_ experience (default: auto-picked)
+HEY_EXPERIENCE_SLUG     preferred experience slug for auto-pick (optional)
 HEY_TIMEOUT             HTTP timeout in seconds (default: 120)
 HEY_MAX_HISTORY         max history messages in the transcript (default: 30)
 HEY_MAX_TOOL_CHARS      max chars per tool result (default: 4000)
@@ -88,6 +89,10 @@ HEY_MAX_CHUNK_CHARS     max chars per history chunk (default: 6000)
 HEY_MAX_CHUNKS          max history chunks in the queue (default: 5)
 HEY_TOOL_RETRY          1/0 – retries on deflection/news drift (default: 1)
 ```
+
+Without `HEY_EXPERIENCE_ID`, the proxy picks a usable chat experience from
+`GET /api/home` automatically (preferred slug first, then any enabled chat
+experience), falling back to the last known default.
 
 `opencode.json` (current format per the [provider docs](https://opencode.ai/docs/providers/)):
 
@@ -206,6 +211,13 @@ handles parallel requests cleanly.
 - Hey_ replies either with plain `content` or a JSON envelope
   `{"answer": ..., "suggestions": ...}` (string or dict, in `content`
   or `parsed`) – the proxy always extracts `answer`.
+- **Reply language:** the prompt language is detected (English/German
+  stopwords); English prompts get a reply-in-English directive (including
+  code comments). German stays native.
+- **Cited links:** Hey_ search answers carry `[bild_0_1]`/`[web_2]` markers
+  plus `sources` (index → title/url) in the stream. The proxy resolves them
+  and appends a `Quellen:` section with clickable links (image markers fall
+  back to their parent article).
 
 ## Project layout
 

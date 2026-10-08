@@ -2,14 +2,26 @@
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
 
 from springerstiefel import tools
-from springerstiefel.config import BROWSER_HEADERS, settings
+from springerstiefel.config import (
+    BROWSER_HEADERS,
+    DEFAULT_EXPERIENCE_ID,
+    settings,
+)
 from springerstiefel.types import HeyEvent, JsonDict, Message
+
+#: Citation markers like [bild_0_1], [web_2], [bild_0_0:image_0].
+CITATION_RE = re.compile(r"\[(bild|web|image)(?:_\d+)+(?:\:[^\]]*)?\]")
+
+#: Resolved sources by citation index: {"bild_0_1": {"title": ..., "url": ...}}.
+Source = dict[str, str]
+Sources = dict[str, Source]
 
 
 def extract_message_text(message: Message) -> str:
@@ -45,6 +57,83 @@ def extract_message_text(message: Message) -> str:
     return ""
 
 
+def extract_sources(delta: JsonDict) -> Sources:
+    """Pull {index: {title, url}} out of a tool delta's sources list."""
+    found: Sources = {}
+    sources = delta.get("sources") or []
+    if not isinstance(sources, list):
+        return found
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        index = source.get("index")
+        url = source.get("url")
+        if not index or not url:
+            continue
+        found[str(index)] = {
+            "title": str(source.get("title") or source.get("name") or url),
+            "url": str(url),
+        }
+    return found
+
+
+def resolve_sources(text: str, sources: Sources) -> list[tuple[str, str, str]]:
+    """Match citation markers in text order against known sources.
+
+    Returns [(marker, title, url)]; image markers (bild_0_0:image_0) fall
+    back to their parent article. Unknown markers are skipped.
+    """
+    resolved: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for match in CITATION_RE.finditer(text):
+        marker = match.group(0)[1:-1]
+        if marker in seen:
+            continue
+        entry = sources.get(marker)
+        if entry is None and ":" in marker:
+            entry = sources.get(marker.split(":")[0])
+        if entry is None:
+            continue
+        seen.add(marker)
+        resolved.append((marker, entry["title"], entry["url"]))
+    return resolved
+
+
+def format_sources(resolved: list[tuple[str, str, str]]) -> str:
+    lines = [f"[{marker}] [{title}]({url})" for marker, title, url in resolved]
+    return "\n\nQuellen:\n" + "\n".join(lines)
+
+
+def append_sources(text: str, sources: Sources) -> str:
+    """Append a Quellen section with resolved citation links, if any."""
+    resolved = resolve_sources(text, sources)
+    if not resolved:
+        return text
+    return text + format_sources(resolved)
+
+
+def pick_experience(items: list[JsonDict]) -> str:
+    """Pick a usable chat experience ID from /api/home items.
+
+    Prefers the HEY_EXPERIENCE_SLUG match, then any enabled chat
+    experience, then any experience with an ID. Falls back to default.
+    """
+    slug = settings.experience_slug.strip().lower()
+    with_ids = [i for i in items if isinstance(i, dict) and i.get("experienceId")]
+    if slug:
+        for item in with_ids:
+            if slug in str(item.get("slug", "")).lower():
+                return str(item["experienceId"])
+    for item in with_ids:
+        if item.get("interactionMode", "chat") == "chat" and not item.get(
+            "isTextInputDisabled", False
+        ):
+            return str(item["experienceId"])
+    if with_ids:
+        return str(with_ids[0]["experienceId"])
+    return DEFAULT_EXPERIENCE_ID
+
+
 # One session = one HTTP client + one Hey_ conversation.
 # A proxy turn shares exactly one session (saves one conversation POST
 # ~170ms per extra call and keeps the turn server-side in one conversation).
@@ -55,7 +144,28 @@ class HeyClient:
     """Stateful client for the Hey_ website backend."""
 
     def __init__(self, experience_id: str | None = None) -> None:
-        self.experience_id = experience_id or settings.experience_id
+        self._experience_id = experience_id or settings.experience_id
+        self._resolved_experience_id: str | None = None
+
+    async def resolve_experience_id(self, client: httpx.AsyncClient) -> str:
+        """Return the experience ID for new conversations.
+
+        Explicit override (constructor/env) wins without any request.
+        Otherwise pick a usable chat experience from GET /api/home,
+        falling back to the last known default. Resolved once per client.
+        """
+        if self._experience_id:
+            return self._experience_id
+        if self._resolved_experience_id is not None:
+            return self._resolved_experience_id
+        try:
+            response = await client.get("/api/home", params={"page": 1, "limit": 15})
+            response.raise_for_status()
+            items = response.json().get("data") or []
+            self._resolved_experience_id = pick_experience(items)
+        except (httpx.HTTPError, ValueError, AttributeError):
+            self._resolved_experience_id = DEFAULT_EXPERIENCE_ID
+        return self._resolved_experience_id
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[HeySession]:
@@ -64,9 +174,10 @@ class HeyClient:
             headers=BROWSER_HEADERS,
             timeout=settings.timeout,
         ) as client:
+            experience_id = await self.resolve_experience_id(client)
             conv = await client.post(
                 "/api/conversations",
-                json={"experienceId": self.experience_id},
+                json={"experienceId": experience_id},
             )
             conv.raise_for_status()
             yield client, conv.json()["conversationId"]
@@ -101,6 +212,9 @@ class HeyClient:
                 delta = choice.get("delta") or {}
                 if delta.get("content"):
                     yield ("content", delta["content"])
+                found = extract_sources(delta)
+                if found:
+                    yield ("sources", found)
                 full = choice.get("message") or {}
                 text = extract_message_text(full)
                 if text:
@@ -109,11 +223,11 @@ class HeyClient:
     async def events(
         self, message: str, session: HeySession | None = None
     ) -> AsyncIterator[HeyEvent]:
-        """Run the Hey_ flow. Yields ("content", str) | ("final", str) | ("done", None).
+        """Run the Hey_ flow.
 
-        "content": streaming delta. "final": full text from the closing
-        object (duplicate of the deltas – prefer when present).
-        Without a session, one is opened per call.
+        Yields ("content", str) | ("sources", dict) | ("final", str) |
+        ("done", None). "sources" maps citation indexes to title/url and can
+        arrive before the text that references them.
         """
         if session is None:
             async with self.session() as (client, conversation_id):
@@ -124,18 +238,29 @@ class HeyClient:
                 yield event
         yield ("done", None)
 
-    async def full_text(
+    async def full_text_with_sources(
         self, message: str, session: HeySession | None = None
-    ) -> str:
-        """Collect the Hey_ answer into one string (for non-streaming)."""
+    ) -> tuple[str, Sources]:
+        """Collect answer text plus any citation sources seen on the way."""
         parts: list[str] = []
         final: str | None = None
+        by_index: Sources = {}
         async for kind, value in self.events(message, session):
             if kind == "content":
                 parts.append(value)
             elif kind == "final":
                 final = value
-        return final if final is not None else "".join(parts)
+            elif kind == "sources":
+                by_index.update(value)
+        text = final if final is not None else "".join(parts)
+        return text, by_index
+
+    async def full_text(
+        self, message: str, session: HeySession | None = None
+    ) -> str:
+        """Collect the Hey_ answer into one string (for non-streaming)."""
+        text, _ = await self.full_text_with_sources(message, session)
+        return text
 
     async def summarize(
         self, jobs: list[str], session: HeySession | None = None
@@ -159,28 +284,27 @@ class HeyClient:
         tool_defs: list[JsonDict] | None,
         user_text: str = "",
         session: HeySession | None = None,
-    ) -> str:
-        """Fetch the Hey_ answer, with one retry each on deflection and drift.
+    ) -> tuple[str, Sources]:
+        """Fetch the Hey_ answer plus citation sources.
 
-        - Deflection (refusal/counter-question despite tools): once with nudge.
-        - Off-topic drift (news/weather dump although neither was asked for):
-          once refocused on the task.
-        (Disable via HEY_TOOL_RETRY=0.)
+        One retry each on deflection and drift (see before); sources always
+        come from the accepted attempt.
+        (Disable retries via HEY_TOOL_RETRY=0.)
         """
-        answer = await self.full_text(message, session)
+        answer, sources = await self.full_text_with_sources(message, session)
         if not tool_defs or not settings.tool_retry:
-            return answer
+            return answer, sources
         _, calls = tools.extract_tool_calls(answer)
         if calls:
-            return answer
+            return answer, sources
         if tools.is_deflection(answer):
-            second = await self.full_text(
+            second, second_sources = await self.full_text_with_sources(
                 f"{message}\n\n{tools.TOOL_RETRY_NUDGE}", session
             )
             _, calls = tools.extract_tool_calls(second)
             if calls or not tools.drift_kind(second, user_text):
-                return second
-            answer = second
+                return second, second_sources
+            answer, sources = second, second_sources
         kind = tools.drift_kind(answer, user_text)
         if kind:
             topics = (
@@ -188,8 +312,8 @@ class HeyClient:
                 if kind == "news"
                 else "Wetter-Themen"
             )
-            return await self.full_text(
+            return await self.full_text_with_sources(
                 f"{message}\n\n{tools.news_refocus_nudge(user_text, topics)}",
                 session,
             )
-        return answer
+        return answer, sources
