@@ -147,9 +147,11 @@ python3 -m pytest -q
 - **Chunk-Queue bei Oversize:** Passt der Verlauf nicht in einen Request
   (`HEY_MAX_CHUNK_CHARS` pro Stück), wird er in eine FIFO-Queue gesplittet:
   ältere Teile werden sequentiell zu 2–3-Satz-Zusammenfassungen verdichtet
-  und ins Finale eingebettet (statt ersatzlos zu droppen). Es laufen höchstens
-  die neuesten `HEY_MAX_CHUNKS` Verlaufschunks durch – jeder Chunk ist ein
-  eigener Hey_-Call, große Verläufe kosten also Zeit.
+  und ins Finale eingebettet (statt ersatzlos zu droppen). Die Zwischenjobs
+  sind unabhängig und laufen **parallel** (`asyncio.gather`) – die Phase
+  kostet max statt Summe. Es laufen höchstens die neuesten `HEY_MAX_CHUNKS`
+  Verlaufschunks durch – jeder Chunk ist ein eigener Hey_-Call, große
+  Verläufe kosten also Zeit.
 - **Tool-Calls:** `tools`/`tool_choice` werden als Ausgabe-Protokoll
   (`<<TOOL_CALL>>`-Blöcke mit JSON + ein Beispiel) formuliert und zu
   OpenAI-`tool_calls` (`finish_reason: tool_calls`) übersetzt. Die

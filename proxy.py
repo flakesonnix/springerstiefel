@@ -14,6 +14,7 @@ in die einzelne Hey_-Message eingebettet. Tool-Aufrufe kommen als
 <<TOOL_CALL>>-Blöcke zurück und werden zu OpenAI-tool_calls übersetzt.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -512,6 +513,18 @@ async def hey_full_text(message: str) -> str:
     return final if final is not None else "".join(parts)
 
 
+async def summarize_intermediates(jobs: list[str]) -> list[str]:
+    """Fasst Zwischenjobs zusammen – parallel, Reihenfolge bleibt erhalten.
+
+    Die Jobs sind unabhängig voneinander (nur ihre Summaries fließen ins
+    Finale), deshalb kostet die Chunk-Phase max statt Summe. Hey_ verträgt
+    parallele Calls (siehe Benchmark D).
+    """
+    if len(jobs) <= 1:
+        return [await hey_full_text(job) for job in jobs]
+    return list(await asyncio.gather(*(hey_full_text(job) for job in jobs)))
+
+
 async def hey_answer(message: str, tools: list | None, user_text: str = "") -> str:
     """Holt die Hey_-Antwort, mit je einem Retry bei Ausweichen und News-Drift.
 
@@ -567,9 +580,7 @@ async def chat_completions(request: Request):
         )
         if final_parts is None:
             return build_hey_message(messages, tools, tool_choice)
-        summaries = []
-        for job in intermediates:
-            summaries.append(await hey_full_text(job))
+        summaries = await summarize_intermediates(intermediates)
         return render_final(final_parts, summaries)
 
     def completion_message(answer: str) -> tuple[dict, str]:

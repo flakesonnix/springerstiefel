@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import unittest.mock
 
 import pytest
@@ -590,3 +591,33 @@ def test_chat_completions_stream_with_tools_emits_tool_chunk():
     assert len(tool_deltas) == 1
     assert tool_deltas[0]["tool_calls"][0]["function"]["name"] == "get_time"
     assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_summarize_intermediates_runs_parallel():
+    async def slow_full_text(message: str):
+        await asyncio.sleep(0.4)
+        return f"Summary of {message}"
+
+    async def run():
+        with unittest.mock.patch.object(proxy, "hey_full_text", slow_full_text):
+            start = time.perf_counter()
+            result = await proxy.summarize_intermediates(["job-a", "job-b"])
+            elapsed = time.perf_counter() - start
+            return result, elapsed
+
+    result, elapsed = asyncio.run(run())
+
+    assert result == ["Summary of job-a", "Summary of job-b"]
+    # Sequentiell wären es 0.8s – parallel deutlich darunter.
+    assert elapsed < 0.6
+
+
+def test_summarize_intermediates_single_and_empty():
+    async def run():
+        assert await proxy.summarize_intermediates([]) == []
+        with unittest.mock.patch.object(
+            proxy, "hey_full_text", lambda m: asyncio.sleep(0, result=f"S({m})")
+        ):
+            assert await proxy.summarize_intermediates(["solo"]) == ["S(solo)"]
+
+    asyncio.run(run())
