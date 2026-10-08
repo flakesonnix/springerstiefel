@@ -425,14 +425,53 @@ def is_news_drift(answer: str, user_text: str) -> bool:
     return any(pattern.search(answer) for pattern in NEWS_RES)
 
 
-def news_refocus_nudge(user_text: str) -> str:
+def news_refocus_nudge(user_text: str, topics: str = "Nachrichten- und Schlagzeilen-Themen") -> str:
     task = user_text.strip().replace("\n", " ")
     if len(task) > 500:
         task = task[:500] + "…"
     return (
-        "[Hinweis: Ignoriere Nachrichten- und Schlagzeilen-Themen. "
+        f"[Hinweis: Ignoriere {topics}. "
         f"Bearbeite nur diese Aufgabe: {task}]"
     )
+
+
+# Marker für Abdriften in Wetter-/News-Modus ohne BILD-Zitate.
+WEATHER_RES: list[re.Pattern[str]] = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\bwetter\b",
+        r"wetterbericht",
+        r"wettervorhersage",
+        r"regenwahrscheinlichkeit",
+        r"\bwind aus\b",
+        r"\bböen\b",
+        r"\bbedeckt\b",
+        r"niederschlag",
+        r"°c",
+    )
+]
+
+# Signale, dass der Nutzer tatsächlich Wetter will – dann kein Retry.
+WEATHER_REQUEST_RES: list[re.Pattern[str]] = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\bwetter",
+        r"wettervorhersage",
+        r"wetterbericht",
+        r"\bregen\b",
+        r"temperatur",
+        r"\bklima\b",
+        r"\bweather\b",
+        r"forecast",
+    )
+]
+
+
+def is_weather_drift(answer: str, user_text: str) -> bool:
+    """True bei Wetter-Dump, obwohl kein Wetter gefragt war."""
+    if any(pattern.search(user_text) for pattern in WEATHER_REQUEST_RES):
+        return False
+    return any(pattern.search(answer) for pattern in WEATHER_RES)
 
 
 def extract_tool_calls(text: str) -> tuple[str, list[JsonDict]]:
@@ -615,11 +654,11 @@ async def hey_answer(
     user_text: str = "",
     session: HeySession | None = None,
 ) -> str:
-    """Holt die Hey_-Antwort, mit je einem Retry bei Ausweichen und News-Drift.
+    """Holt die Hey_-Antwort, mit je einem Retry bei Ausweichen und Off-Topic-Drift.
 
     - Ausweichen (Verweigerung/Rückfrage trotz Tools): einmal mit Nudge.
-    - News-Drift (Schlagzeilen-Dump statt Aufgabe, keine News gefragt):
-      einmal mit Refokus auf die Aufgabe.
+    - Off-Topic-Drift (News-/Wetter-Dump statt Aufgabe, obwohl weder News
+      noch Wetter gefragt waren): einmal mit Refokus auf die Aufgabe.
     (Abschaltbar via HEY_TOOL_RETRY=0.)
     """
     answer = await hey_full_text(message, session)
@@ -631,14 +670,29 @@ async def hey_answer(
     if is_deflection(answer):
         second = await hey_full_text(f"{message}\n\n{TOOL_RETRY_NUDGE}", session)
         _, calls = extract_tool_calls(second)
-        if calls or not is_news_drift(second, user_text):
+        if calls or not drift_kind(second, user_text):
             return second
         answer = second
-    if is_news_drift(answer, user_text):
+    kind = drift_kind(answer, user_text)
+    if kind:
+        topics = (
+            "Nachrichten- und Schlagzeilen-Themen"
+            if kind == "news"
+            else "Wetter-Themen"
+        )
         return await hey_full_text(
-            f"{message}\n\n{news_refocus_nudge(user_text)}", session
+            f"{message}\n\n{news_refocus_nudge(user_text, topics)}", session
         )
     return answer
+
+
+def drift_kind(answer: str, user_text: str) -> str | None:
+    """Gibt "news"/"weather" bei Off-Topic-Drift zurück, sonst None."""
+    if is_news_drift(answer, user_text):
+        return "news"
+    if is_weather_drift(answer, user_text):
+        return "weather"
+    return None
 
 
 @app.post("/v1/chat/completions")

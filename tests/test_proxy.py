@@ -880,3 +880,49 @@ def test_tool_choice_none_hides_tools_end_to_end():
     assert len(seen) == 1
     assert "<<TOOL_CALL>>" not in seen[0]
     assert "Sag einfach hallo" in seen[0]
+
+
+def test_is_weather_drift_detects_dump():
+    dump = "Aktuell in Berlin: 14,5 °C, Regenwahrscheinlichkeit 68 %."
+
+    assert proxy.is_weather_drift(dump, "Erstelle die Datei hello.rs.")
+    assert not proxy.is_weather_drift("Hier ist der Code.", "Erstelle hello.rs.")
+
+
+def test_is_weather_drift_skips_genuine_weather_requests():
+    dump = "Aktuell in Berlin: 14,5 °C."
+
+    assert not proxy.is_weather_drift(dump, "Wie ist das Wetter heute?")
+    assert not proxy.is_weather_drift(dump, "Schreibe eine Wetter-App.")
+
+
+def test_drift_kind_mapping():
+    assert proxy.drift_kind("Schlagzeilen [bild_0_1]", "Mach X.") == "news"
+    assert proxy.drift_kind("14 °C, Böen", "Mach X.") == "weather"
+    assert proxy.drift_kind("Hier der Code.", "Mach X.") is None
+    assert proxy.drift_kind("Schlagzeilen!", "Was gibt es Neues?") is None
+
+
+def test_hey_answer_refocuses_weather_drift():
+    calls = {"n": 0}
+
+    async def events(message: str, session=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield ("final", "Aktuell in Berlin: 14,5 °C, Regen.")
+        else:
+            assert "Wetter-Themen" in message
+            assert "hello.rs" in message
+            yield ("final", "Erledigt.")
+        yield ("done", None)
+
+    async def run():
+        with unittest.mock.patch.object(proxy, "hey_events", events):
+            return await proxy.hey_answer(
+                "Mach X.", [{"type": "function"}], "Erstelle hello.rs."
+            )
+
+    answer = asyncio.run(run())
+
+    assert calls["n"] == 2
+    assert answer == "Erledigt."

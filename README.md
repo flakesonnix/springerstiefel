@@ -191,10 +191,11 @@ handles parallel requests cleanly.
 - **Retry on deflection:** if tools were offered but no tool call comes back
   and the answer looks like a refusal/deflection (patterns in `REFUSAL_RES`),
   it is retried once with a nudge (`HEY_TOOL_RETRY=0` disables it).
-- **Retry on news drift:** if the proxy spots BILD markers (`[bild_0_1]`,
-  “headlines”, “BILDplus” …) although no news was asked for, it retries once
-  refocused on the task. Genuine news questions (patterns in
-  `NEWS_REQUEST_RES`) are exempt.
+- **Retry on news/weather drift:** if the proxy spots BILD markers (`[bild_0_1]`,
+  “headlines”, “BILDplus” …) or weather markers (“rain probability”, “gusts”,
+  “°C” …) although neither news nor weather was asked for, it retries once
+  refocused on the task. Genuine news/weather questions (patterns in
+  `NEWS_REQUEST_RES` / `WEATHER_REQUEST_RES`) are exempt.
 - **Honest limitation:** Hey_ is a consumer news assistant, not an agent
   model. It sometimes calls tools reliably, sometimes deflects to questions,
   and occasionally drifts into news mode (headlines instead of action). The
