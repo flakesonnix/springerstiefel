@@ -4,6 +4,7 @@ import os
 import time
 import unittest.mock
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -746,6 +747,14 @@ def test_summarize_intermediates_runs_parallel():
     assert elapsed < 0.6
 
 
+def test_shared_transport_singleton():
+    first = hey_module.shared_transport()
+    second = hey_module.shared_transport()
+
+    assert isinstance(first, httpx.AsyncHTTPTransport)
+    assert first is second
+
+
 def test_turn_shares_single_session_across_retry():
     chats = []
     sessions = {"entries": 0}
@@ -882,7 +891,7 @@ def test_hey_session_creates_single_conversation():
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
-            pass
+            self.kwargs = kwargs
 
         async def __aenter__(self):
             return self
@@ -898,6 +907,7 @@ def test_hey_session_creates_single_conversation():
         with unittest.mock.patch.object(hey_module.httpx, "AsyncClient", FakeClient):
             async with HeyClient().session() as (client, cid):
                 assert isinstance(client, FakeClient)
+                assert client.kwargs["transport"] is hey_module.shared_transport()
                 return cid
 
     assert asyncio.run(run()) == "cid-9"

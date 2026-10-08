@@ -20,9 +20,10 @@ import time
 import httpx
 
 from springerstiefel import config as config_module
+from springerstiefel import language as language_module
 from springerstiefel import messages as messages_module
 from springerstiefel import tools as tools_module
-from springerstiefel.hey import HeyClient, extract_message_text
+from springerstiefel.hey import HeyClient, append_sources, extract_message_text
 
 hey_client = HeyClient()
 
@@ -223,17 +224,94 @@ def bench_micro() -> None:
     many_lines = [f"line {i}: {'y' * 200}" for i in range(500)]
     best_of("split_lines (500 lines)", 20, messages_module.split_lines, many_lines, 6000)
 
+    best_of("detect_language (200 chars)", 20,
+            language_module.detect_language,
+            "Write a calculator in rust with tests and docs. " * 4)
+    best_of("is_action_request", 20,
+            tools_module.is_action_request, "Write the file f.")
+    best_of("append_sources (5 markers)", 20,
+            append_sources,
+            "See [bild_0_0] and [bild_0_1].",
+            {"bild_0_0": {"title": "A", "url": "https://x/0"},
+             "bild_0_1": {"title": "B", "url": "https://x/1"}})
+
+
+async def bench_experience() -> None:
+    print("=" * 70)
+    print("F. Experience auto-resolve (cold vs cached, live)")
+    print("=" * 70)
+    client = HeyClient()
+
+    t0 = time.perf_counter()
+    async with client.session() as (http_client, cid):
+        cold_ms = (time.perf_counter() - t0) * 1000
+    log("cold resolve + conversation", ms=f"{cold_ms:.0f}", cid=cid[:8])
+
+    t0 = time.perf_counter()
+    async with client.session() as (http_client2, cid2):
+        warm_ms = (time.perf_counter() - t0) * 1000
+    log("cached resolve + conversation", ms=f"{warm_ms:.0f}", cid=cid2[:8])
+    log("resolve overhead (cold-warm)", ms=f"{cold_ms - warm_ms:.0f}")
+
+
+async def bench_endpoint() -> None:
+    print("=" * 70)
+    print("G. Endpoint overhead with mocked backend (offline)")
+    print("=" * 70)
+    from fastapi.testclient import TestClient
+
+    from springerstiefel.app import app
+
+    history = make_history(30, tool_bytes=50_000)
+
+    async def fake_events(self, message, session=None):
+        yield ("final", "Hallo!")
+
+    import unittest.mock
+
+    with unittest.mock.patch.object(
+        HeyClient, "events", fake_events
+    ):
+        test_client = TestClient(app)
+
+        def post_plain():
+            test_client.post(
+                "/v1/chat/completions",
+                json={"model": "hey", "messages": history},
+            )
+
+        def post_stream():
+            response = test_client.post(
+                "/v1/chat/completions",
+                json={"model": "hey", "messages": history, "stream": True},
+            )
+            assert response.status_code == 200
+
+        best_of_sync("POST non-stream (30 turns)", 5, post_plain)
+        best_of_sync("POST stream (30 turns)", 5, post_stream)
+
+
+def best_of_sync(label: str, rounds: int, func) -> None:
+    times = []
+    for _ in range(rounds):
+        t0 = time.perf_counter()
+        func()
+        times.append((time.perf_counter() - t0) * 1000)
+    log(label, best_ms=f"{min(times):.1f}", worst_ms=f"{max(times):.1f}")
+
 
 async def main() -> None:
     quick = "--quick" in sys.argv
     bench_build()
     bench_micro()
     if quick:
-        print("(skipping live sections B/C/D – pass no flags for the full run)")
+        print("(skipping live sections B/C/D/F/G – pass no flags for full run)")
         return
     await bench_live()
     await bench_chunked()
     await bench_concurrent()
+    await bench_experience()
+    await bench_endpoint()
 
 
 if __name__ == "__main__":

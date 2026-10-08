@@ -167,7 +167,8 @@ handles parallel requests cleanly.
 - **Stateless:** every OpenAI request gets a fresh Hey_ conversation.
   All calls within one turn (chunks, retries) share **a single** session
   (one HTTP client + one conversation) – saves one conversation POST
-  (~170 ms) per extra call.
+  (~170 ms) per extra call. TCP/TLS connections pool process-wide across
+  turns (per-turn cookie jars stay isolated).
   Hey_ accepts only a single message per request, so history, system prompt,
   and tool definitions are embedded as a transcript (`HEY_MAX_HISTORY`,
   default: 30 messages). After a tool round-trip the proxy asks to continue

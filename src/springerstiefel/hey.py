@@ -139,6 +139,28 @@ def pick_experience(items: list[JsonDict]) -> str:
 # ~170ms per extra call and keeps the turn server-side in one conversation).
 HeySession = tuple[httpx.AsyncClient, str]
 
+_shared_transport: httpx.AsyncHTTPTransport | None = None
+
+
+def shared_transport() -> httpx.AsyncHTTPTransport:
+    """Process-wide pooled transport (TCP/TLS reuse across turns).
+
+    Per-turn clients keep their own cookie jar for isolation; only the
+    connection pool is shared.
+    """
+    global _shared_transport
+    if _shared_transport is None:
+        _shared_transport = _PooledTransport()
+    return _shared_transport
+
+
+class _PooledTransport(httpx.AsyncHTTPTransport):
+    """Transport whose pool outlives single clients.
+
+    Per-turn clients are closed after their turn; closing must not tear
+    down the shared pool, so aclose is a no-op (process lifetime).
+    """
+
 
 class HeyClient:
     """Stateful client for the Hey_ website backend."""
@@ -170,6 +192,7 @@ class HeyClient:
     @asynccontextmanager
     async def session(self) -> AsyncIterator[HeySession]:
         async with httpx.AsyncClient(
+            transport=shared_transport(),
             base_url=settings.base_url,
             headers=BROWSER_HEADERS,
             timeout=settings.timeout,
