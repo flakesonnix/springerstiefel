@@ -3,15 +3,16 @@
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
-from playwright.async_api import async_playwright
+from playwright.async_api import Request, Response, async_playwright
 
 
 DATA_DIR = Path("data")
 PROFILE_DIR = DATA_DIR / "browser-firefox"
 TRAFFIC_FILE = DATA_DIR / "traffic.jsonl"
 
-INTERESTING_KEYWORDS = (
+INTERESTING_KEYWORDS: tuple[str, ...] = (
     "api",
     "chat",
     "conversation",
@@ -50,23 +51,24 @@ async def main_async() -> None:
         print("==============================================")
         print()
 
-        async def request_handler(request):
-            resource = request.resource_type
+        async def request_handler(request: Request) -> None:
+            resource: str = request.resource_type
 
             if resource not in {"fetch", "xhr"}:
                 return
 
-            url = request.url
+            url: str = request.url
 
             if not is_interesting_url(url):
                 return
 
+            post_data: str | None
             try:
                 post_data = request.post_data
             except Exception:
                 post_data = None
 
-            entry = {
+            entry: dict[str, Any] = {
                 "kind": "request",
                 "method": request.method,
                 "url": url,
@@ -85,23 +87,24 @@ async def main_async() -> None:
             if post_data:
                 print(post_data[:4000])
 
-        async def response_handler(response):
+        async def response_handler(response: Response) -> None:
             request = response.request
 
             if request.resource_type not in {"fetch", "xhr"}:
                 return
 
-            url = response.url
+            url: str = response.url
 
             if not is_interesting_url(url):
                 return
 
+            body: str
             try:
                 body = await response.text()
             except Exception:
                 body = "<unable to read response>"
 
-            entry = {
+            entry: dict[str, Any] = {
                 "kind": "response",
                 "status": response.status,
                 "url": url,

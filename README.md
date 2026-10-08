@@ -125,6 +125,7 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 
 ```bash
 python3 -m pytest -q
+python3 -m mypy proxy.py capture.py
 ```
 
 - `tests/test_proxy.py` – `/v1/models`, validation (400 without messages),

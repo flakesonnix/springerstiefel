@@ -21,10 +21,16 @@ import re
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
 import uvicorn
+
+JsonDict = dict[str, Any]
+Message = dict[str, Any]
+ToolChoice = str | JsonDict | None
+HeyEvent = tuple[str, Any]
+FinalParts = dict[str, Any | None]
 
 HEY_BASE = "https://hey.bild.de"
 HEY_EXPERIENCE_ID = os.environ.get(
@@ -38,7 +44,7 @@ HEY_MAX_CHUNK_CHARS = int(os.environ.get("HEY_MAX_CHUNK_CHARS", "6000"))
 HEY_MAX_CHUNKS = int(os.environ.get("HEY_MAX_CHUNKS", "5"))
 HEY_TOOL_RETRY = os.environ.get("HEY_TOOL_RETRY", "1") == "1"
 
-BROWSER_HEADERS = {
+BROWSER_HEADERS: dict[str, str] = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) "
         "Gecko/20100101 Firefox/155.0"
@@ -51,7 +57,7 @@ app = FastAPI(title="springerstiefel")
 
 
 @app.get("/v1/models")
-async def models():
+async def models() -> JsonDict:
     return {
         "object": "list",
         "data": [
@@ -64,7 +70,7 @@ async def models():
     }
 
 
-def message_text(message: dict) -> str:
+def message_text(message: Message) -> str:
     """Extrahiert lesbaren Text aus einer OpenAI-Message (str oder Parts)."""
     content = message.get("content", "")
     if isinstance(content, str):
@@ -78,14 +84,14 @@ def message_text(message: dict) -> str:
     return ""
 
 
-def last_user_index(messages: list) -> int:
+def last_user_index(messages: list[Message]) -> int:
     for i in range(len(messages) - 1, -1, -1):
         if messages[i].get("role") == "user":
             return i
     raise HTTPException(400, "No user message supplied")
 
 
-def last_user_text(messages: list) -> str:
+def last_user_text(messages: list[Message]) -> str:
     """Nimmt die letzte User-Nachricht (Hey_ kennt nur eine einzelne Message)."""
     return message_text(messages[last_user_index(messages)])
 
@@ -108,7 +114,11 @@ TOOL_INSTRUCTIONS = (
 )
 
 
-def _message_parts(messages: list, tools: list | None, tool_choice: Any):
+def _message_parts(
+    messages: list[Message],
+    tools: list[JsonDict] | None,
+    tool_choice: ToolChoice,
+) -> tuple[str | None, list[str], str, str | None]:
     """Zerlegt in (system_section|None, transcript_lines, current, tool_section|None)."""
     idx = last_user_index(messages)
 
@@ -184,7 +194,9 @@ def _message_parts(messages: list, tools: list | None, tool_choice: Any):
 
 
 def build_hey_message(
-    messages: list, tools: list | None = None, tool_choice: Any = None
+    messages: list[Message],
+    tools: list[JsonDict] | None = None,
+    tool_choice: ToolChoice = None,
 ) -> str:
     """Bettet Verlauf + System-Prompt + Tool-Definitionen in eine Hey_-Message ein.
 
@@ -243,7 +255,7 @@ def render_intermediate(
     )
 
 
-def render_final(parts: dict, summaries: list[str]) -> str:
+def render_final(parts: FinalParts, summaries: list[str]) -> str:
     sections = [
         s
         for s in (
@@ -268,7 +280,11 @@ def render_final(parts: dict, summaries: list[str]) -> str:
     return "\n\n".join(sections)
 
 
-def build_hey_jobs(messages: list, tools: list | None, tool_choice: Any):
+def build_hey_jobs(
+    messages: list[Message],
+    tools: list[JsonDict] | None,
+    tool_choice: ToolChoice,
+) -> tuple[list[str], FinalParts | None]:
     """Baut die FIFO-Jobliste für oversized Prompts.
 
     Gibt (zwischenjobs, finale_bausteine|None) zurück. Ist der Verlauf klein
@@ -299,13 +315,13 @@ def build_hey_jobs(messages: list, tools: list | None, tool_choice: Any):
     return intermediates, final_parts
 
 
-TOOL_CALL_RE = re.compile(
+TOOL_CALL_RE: re.Pattern[str] = re.compile(
     r"<<TOOL_CALL>>\s*(\{.*?\})\s*<<END_TOOL_CALL>>", re.DOTALL
 )
 
 # Antwort-Muster, die nach Ausweichen/Rückfrage statt Tool-Nutzung aussehen.
 # Nur dann lohnt ein einzelner Retry mit Nudge (siehe hey_answer).
-REFUSAL_RES = [
+REFUSAL_RES: list[re.Pattern[str]] = [
     re.compile(p, re.IGNORECASE)
     for p in (
         r"wobei soll ich",
@@ -340,7 +356,7 @@ def is_deflection(answer: str) -> bool:
 
 
 # Marker für Abdriften in den News-Modus (BILD-Grounding mit Zitaten).
-NEWS_RES = [
+NEWS_RES: list[re.Pattern[str]] = [
     re.compile(p, re.IGNORECASE)
     for p in (
         r"\[bild_\d",
@@ -352,7 +368,7 @@ NEWS_RES = [
 ]
 
 # Signale, dass der Nutzer tatsächlich News will – dann kein Retry.
-NEWS_REQUEST_RES = [
+NEWS_REQUEST_RES: list[re.Pattern[str]] = [
     re.compile(p, re.IGNORECASE)
     for p in (
         r"nachricht",
@@ -383,14 +399,14 @@ def news_refocus_nudge(user_text: str) -> str:
     )
 
 
-def extract_tool_calls(text: str) -> tuple[str, list]:
+def extract_tool_calls(text: str) -> tuple[str, list[JsonDict]]:
     """Parst <<TOOL_CALL>>-Blöcke zu OpenAI-tool_calls. Gibt (Resttext, Calls) zurück.
 
     Unparsbare Blöcke bleiben im Text stehen (Modellfehler bleibt sichtbar).
     """
-    calls: list[dict] = []
+    calls: list[JsonDict] = []
 
-    def replace(match: "re.Match") -> str:
+    def replace(match: re.Match[str]) -> str:
         try:
             obj = json.loads(match.group(1))
         except json.JSONDecodeError:
@@ -441,7 +457,7 @@ async def hey_session() -> AsyncIterator[HeySession]:
 
 async def _hey_events(
     client: httpx.AsyncClient, conversation_id: str, message: str
-) -> AsyncIterator[tuple[str, Any]]:
+) -> AsyncIterator[HeyEvent]:
     async with client.stream(
         "POST",
         "/api/chat",
@@ -477,7 +493,7 @@ async def _hey_events(
 
 async def hey_events(
     message: str, session: HeySession | None = None
-) -> AsyncIterator[tuple[str, Any]]:
+) -> AsyncIterator[HeyEvent]:
     """Führt den Hey_-Flow aus. Yields ("content", str) | ("final", str) | ("done", None).
 
     "content": Streaming-Delta. "final": vollständiger Text aus dem
@@ -494,7 +510,7 @@ async def hey_events(
     yield ("done", None)
 
 
-def extract_message_text(message: dict) -> str:
+def extract_message_text(message: Message) -> str:
     """Holt den Antworttext aus einem Hey_-Message-Objekt.
 
     Hey_ liefert den Text mal als plain `content`, mal als JSON-Hülle
@@ -559,7 +575,7 @@ async def summarize_intermediates(
 
 async def hey_answer(
     message: str,
-    tools: list | None,
+    tools: list[JsonDict] | None,
     user_text: str = "",
     session: HeySession | None = None,
 ) -> str:
@@ -590,13 +606,15 @@ async def hey_answer(
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
-    body = await request.json()
+async def chat_completions(
+    request: Request,
+) -> Response:
+    body: JsonDict = await request.json()
 
-    messages = body.get("messages", [])
-    stream = body.get("stream", False)
-    tools = body.get("tools") or None
-    tool_choice = body.get("tool_choice", "auto")
+    messages: list[Message] = body.get("messages", [])
+    stream: bool = body.get("stream", False)
+    tools: list[JsonDict] | None = body.get("tools") or None
+    tool_choice: ToolChoice = body.get("tool_choice", "auto")
 
     if not messages:
         raise HTTPException(400, "No messages supplied")
@@ -622,7 +640,7 @@ async def chat_completions(request: Request):
         summaries = await summarize_intermediates(intermediates, session)
         return render_final(final_parts, summaries)
 
-    def completion_message(answer: str) -> tuple[dict, str]:
+    def completion_message(answer: str) -> tuple[Message, str | None]:
         """Baut (message, finish_reason) – mit Tool-Calls falls vorhanden."""
         if tools:
             clean, tool_calls = extract_tool_calls(answer)
@@ -637,9 +655,13 @@ async def chat_completions(request: Request):
                 )
         return ({"role": "assistant", "content": answer}, "stop")
 
-    def chunk(content: str | None = None, tool_calls: list | None = None,
-              role: str | None = None, finish: str | None = None) -> str:
-        delta: dict = {}
+    def chunk(
+        content: str | None = None,
+        tool_calls: list[JsonDict] | None = None,
+        role: str | None = None,
+        finish: str | None = None,
+    ) -> str:
+        delta: JsonDict = {}
         if role is not None:
             delta["role"] = role
         if content is not None:
@@ -677,7 +699,7 @@ async def chat_completions(request: Request):
         # läuft erst nach Return los – nichts aus dem Endpoint-Scope
         # wiederverwenden).
         if tools:
-            async def generate_buffered():
+            async def generate_buffered() -> AsyncIterator[str]:
                 async with hey_session() as session:
                     text = await resolve_text(session)
                     yield chunk(role="assistant")
@@ -695,7 +717,7 @@ async def chat_completions(request: Request):
                 generate_buffered(), media_type="text/event-stream"
             )
 
-        async def generate():
+        async def generate() -> AsyncIterator[str]:
             async with hey_session() as session:
                 text = await resolve_text(session)
                 yield chunk(role="assistant")
@@ -711,7 +733,7 @@ async def chat_completions(request: Request):
         raise HTTPException(502, f"Hey_ backend error: {e}")
 
 
-def main():
+def main() -> None:
     uvicorn.run(
         app,
         host="127.0.0.1",
