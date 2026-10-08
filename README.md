@@ -125,8 +125,21 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 
 ```bash
 python3 -m pytest -q
-python3 -m mypy proxy.py capture.py
+python3 -m mypy proxy.py capture.py benchmarks/bench.py
 ```
+
+Benchmarks (verbose phase timing; live sections hit `hey.bild.de`):
+
+```bash
+python3 benchmarks/bench.py           # everything
+python3 benchmarks/bench.py --quick   # offline only (build + micro)
+```
+
+Findings so far: Python overhead is negligible (build <0.1 ms, parsing
+sub-millisecond); per Hey_ call the conversation POST costs ~170 ms and
+time-to-first-chunk ~1.5 s – model generation dominates, prefill size barely
+matters. Chunk intermediates run in parallel (max instead of sum), and Hey_
+handles parallel requests cleanly.
 
 - `tests/test_proxy.py` – `/v1/models`, validation (400 without messages),
   non-streaming shape (prefers final text), streaming SSE (`role` →

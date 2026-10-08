@@ -4,6 +4,7 @@ import time
 import unittest.mock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import proxy
@@ -666,3 +667,187 @@ def test_summarize_intermediates_single_and_empty():
             assert await proxy.summarize_intermediates(["solo"]) == ["S(solo)"]
 
     asyncio.run(run())
+
+
+def test_message_text_handles_odd_content():
+    assert proxy.message_text({"role": "user"}) == ""
+    assert proxy.message_text({"role": "user", "content": None}) == ""
+    assert proxy.message_text({"role": "user", "content": 123}) == ""
+    assert proxy.message_text({"role": "user", "content": [{"type": "x"}]}) == ""
+
+
+def test_last_user_index_raises_without_user():
+    with pytest.raises(HTTPException) as exc:
+        proxy.last_user_index([{"role": "system", "content": "x"}])
+
+    assert exc.value.status_code == 400
+
+
+def test_news_refocus_nudge_truncates_long_task():
+    nudge = proxy.news_refocus_nudge("x" * 1000)
+
+    assert nudge.endswith("…]")
+    assert "x" * 1000 not in nudge
+    assert "Bearbeite nur diese Aufgabe" in nudge
+
+
+def test_render_final_variants():
+    bare = {"system": None, "lines": [], "current": "Hi", "tools": None}
+
+    assert proxy.render_final(bare, []) == "Aktuelle Anweisung:\nHi"
+
+    full = {
+        "system": "[Systemanweisung]\nSei knapp.",
+        "lines": ["Benutzer: Frage"],
+        "current": "Antworte.",
+        "tools": "[Tools]\n<<TOOL_CALL>>",
+    }
+    rendered = proxy.render_final(full, [])
+
+    assert "[Systemanweisung]" in rendered
+    assert "Benutzer: Frage" in rendered
+    assert "Zusammenfassung" not in rendered
+    assert rendered.endswith("Aktuelle Anweisung:\nAntworte.\n\n[Tools]\n<<TOOL_CALL>>")
+
+
+def test_render_intermediate_numbering():
+    text = proxy.render_intermediate("[Systemanweisung]\nS.", ["a", "b"], 2, 5)
+
+    assert "Teil 2/5" in text
+    assert text.index("[Systemanweisung]") < text.index("Teil 2/5")
+    assert text.endswith("Antworte nur mit der Zusammenfassung.")
+
+
+def test_build_hey_jobs_tools_only_in_final(monkeypatch):
+    monkeypatch.setattr(proxy, "HEY_MAX_CHUNK_CHARS", 40)
+    monkeypatch.setattr(proxy, "HEY_MAX_CHUNKS", 5)
+    tools = [{"type": "function", "function": {"name": "write"}}]
+    messages = [
+        {"role": "user", "content": "erste alte Frage"},
+        {"role": "assistant", "content": "alte Antwort"},
+        {"role": "user", "content": "noch eine Frage"},
+        {"role": "assistant", "content": "noch eine Antwort"},
+        {"role": "user", "content": "Frage neu"},
+    ]
+
+    intermediates, final_parts = proxy.build_hey_jobs(messages, tools, "auto")
+
+    assert len(intermediates) >= 1
+    assert "<<TOOL_CALL>>" not in "\n".join(intermediates)
+    assert "<<TOOL_CALL>>" in final_parts["tools"]
+
+
+def test_hey_session_creates_single_conversation():
+    posts = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"conversationId": "cid-9"}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, **kwargs):
+            posts.append(url)
+            return FakeResponse()
+
+    async def run():
+        with unittest.mock.patch.object(proxy.httpx, "AsyncClient", FakeClient):
+            async with proxy.hey_session() as (client, cid):
+                assert isinstance(client, FakeClient)
+                return cid
+
+    assert asyncio.run(run()) == "cid-9"
+    assert posts == ["/api/conversations"]
+
+
+def test_hey_events_skips_garbage_lines():
+    lines = [
+        "hello without prefix",
+        "data: not json at all",
+        'data: {"nochoices": true}',
+        'data: {"choices": []}',
+        'data: {"choices": [{"index": 0, "delta": {"content": "", "suggestions": ["a"]}}]}',
+        'data: {"choices": [{"index": 0, "delta": {"content": "Hi"}}]}',
+        "data: [DONE]",
+    ]
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        async def aiter_lines(self):
+            for line in lines:
+                yield line
+
+    class FakeStream:
+        def __init__(self, response):
+            self.response = response
+
+        async def __aenter__(self):
+            return self.response
+
+        async def __aexit__(self, *args):
+            return False
+
+    class FakeClient:
+        def stream(self, *args, **kwargs):
+            assert kwargs["headers"]["x-conversation-id"] == "cid-1"
+            return FakeStream(FakeResponse())
+
+    async def run():
+        with unittest.mock.patch.object(proxy, "hey_events", _REAL_HEY_EVENTS):
+            return [
+                event
+                async for event in proxy.hey_events("msg", session=(FakeClient(), "cid-1"))
+            ]
+
+    assert asyncio.run(run()) == [("content", "Hi"), ("done", None)]
+
+
+def test_hey_full_text_falls_back_to_joined_deltas():
+    async def deltas_only(message: str, session=None):
+        yield ("content", "Hal")
+        yield ("content", "lo")
+        yield ("done", None)
+
+    async def run():
+        with unittest.mock.patch.object(proxy, "hey_events", deltas_only):
+            return await proxy.hey_full_text("msg")
+
+    assert asyncio.run(run()) == "Hallo"
+
+
+def test_tool_choice_none_hides_tools_end_to_end():
+    seen = []
+
+    async def recorder(message: str, session=None):
+        seen.append(message)
+        for event in FAKE_EVENTS:
+            yield event
+
+    with unittest.mock.patch.object(proxy, "hey_events", recorder):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "hey",
+                "messages": MESSAGES,
+                "tools": [{"type": "function", "function": {"name": "write"}}],
+                "tool_choice": "none",
+            },
+        )
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    assert "<<TOOL_CALL>>" not in seen[0]
+    assert "Sag einfach hallo" in seen[0]
