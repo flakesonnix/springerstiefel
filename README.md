@@ -128,6 +128,12 @@ python3 -m pytest -q
 python3 -m mypy proxy.py capture.py benchmarks/bench.py
 ```
 
+Dev loop (reinstall, clean proxy restart, checks, live smoke test):
+
+```bash
+nix develop --command bash scripts/reload.sh
+```
+
 Benchmarks (verbose phase timing; live sections hit `hey.bild.de`):
 
 ```bash
